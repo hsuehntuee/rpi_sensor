@@ -304,8 +304,16 @@ def main() -> None:
                     print("  SUCCESS: Lepton core booted and ready (BootOK=True)!")
                     boot_ok = True
                     break
+            
+            if not boot_ok:
+                print("\n  ERROR: Lepton core is stuck in BootOK=False (Status 0x0002).")
+                print("  Hardware Suggestions:")
+                print("    1. Unplug and re-plug Lepton 3.3V power (Pin 17) and GND (Pin 9).")
+                print("    2. Ensure PWR_DWN and RESET pins on breakout board are pulled HIGH (3.3V).")
+                sys.exit(1)
     else:
         print("  ERROR: Cannot reach Lepton over I2C. Check SDA/SCL wiring.")
+        sys.exit(1)
 
     # ── Step 2: SPI open & hardware resync ──
     print("\n[2/3] Opening SPI device (/dev/spidev0.0, Mode 3, 20MHz)...")
@@ -322,8 +330,8 @@ def main() -> None:
     resync(reader, 0.5)
 
     # ── Step 3: Attempt to capture valid frame ──
-    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 5 seconds)...")
-    frame = try_capture(reader, max_attempts=1500)
+    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 2 seconds)...")
+    frame = try_capture(reader, max_attempts=100)
     reader.close()
 
     if frame is None:

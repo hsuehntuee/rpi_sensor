@@ -72,8 +72,8 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 class VoSPIReader:
     """Communication class for FLIR Lepton module on SPI.
 
-    Chunks 60 packets into 3 ioctl calls (24, 24, 12 packets) with tx_buf=0.
-    Each ioctl data payload is <= 3936 bytes (under kernel bufsiz 4096).
+    Chunks 60 packets into 6 ioctl calls of 10 packets each (1640B payload).
+    Each ioctl payload is <= 1640 bytes, satisfying kernel bufsiz limits down to 2048B.
     CS stays low for packets 0..58, and is de-asserted (HIGH) on packet 59.
     """
 
@@ -89,8 +89,8 @@ class VoSPIReader:
         # Buffer for full frame (60 x 82 uint16)
         self._capture_buf = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
         
-        # 3 chunks: (start_pkt, num_pkts) -> (0,24), (24,24), (48,12)
-        self.chunks = [(0, 24), (24, 24), (48, 12)]
+        # 6 chunks of 10 packets: (0,10), (10,10), (20,10), (30,10), (40,10), (50,10)
+        self.chunks = [(i * 10, 10) for i in range(6)]
         msg_size = self.XFER_STRUCT.size
         
         self._msg_bufs = []
@@ -120,7 +120,6 @@ class VoSPIReader:
                 )
             
             self._msg_bufs.append(buf)
-            # cmd size must be total bytes of structs in this ioctl call
             cmd = _IOC(1, SPI_IOC_MAGIC, 0, buf_bytes)
             self._ioc_cmds.append(cmd)
 
@@ -136,7 +135,7 @@ class VoSPIReader:
             self.fd = -1
 
     def read_frame_raw(self) -> np.ndarray:
-        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all 60 pkts."""
+        """Issue 6 chunked ioctl calls (10 pkts each). CS stays low across all 60 pkts."""
         for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
             fcntl.ioctl(self.fd, cmd, buf)
         return self._capture_buf.copy()

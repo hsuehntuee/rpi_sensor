@@ -226,12 +226,12 @@ class LeptonVoSPI:
         self._txbuf = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._capture_buf = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
 
-        # Chunk frame packets into ioctl calls of at most 24 packets (3936 bytes <= 4096 bufsiz)
-        if self.rows_per_read <= 24:
+        # Chunk frame packets into ioctl calls of 10 packets each (1640 bytes payload <= 2048/4096 bufsiz)
+        if self.rows_per_read <= 10:
             self.chunks = [(0, self.rows_per_read)]
         else:
-            # 60 rows -> (0,24), (24,24), (48,12)
-            self.chunks = [(0, 24), (24, 24), (48, 12)]
+            # 60 rows -> 6 chunks of 10 rows
+            self.chunks = [(i * 10, 10) for i in range(self.rows_per_read // 10)]
 
         msg_sz = self.XFER_STRUCT.size
         self._msg_bufs = []

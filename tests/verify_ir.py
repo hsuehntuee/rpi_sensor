@@ -265,7 +265,7 @@ def main() -> None:
     except Exception:
         print("Info: Using default 80x60")
 
-    # ── Step 1: I2C probe ──
+    # ── Step 1: I2C probe & BootOK wait loop ──
     print("\n[1/3] Probing Lepton CCI (I2C bus 1, address 0x2A)...")
     status_reg = read_raw_status(bus_number=1, address=0x2A)
     if status_reg is not None:
@@ -273,8 +273,15 @@ def main() -> None:
         boot_ok = bool(status_reg & 0x0004)
         print(f"  Status Register: 0x{status_reg:04X}  "
               f"(Busy={busy}, BootOK={boot_ok})")
-        if not boot_ok:
-            print("  WARNING: Boot not complete. Lepton may still be starting up.")
+        if not boot_ok or busy:
+            print("  Info: Lepton core is booting/calibrating. Waiting up to 3 seconds for BootOK...")
+            for _ in range(15):
+                time.sleep(0.2)
+                status_reg = read_raw_status(bus_number=1, address=0x2A)
+                if status_reg is not None and bool(status_reg & 0x0004) and not bool(status_reg & 0x0001):
+                    print("  SUCCESS: Lepton core booted and ready (BootOK=True)!")
+                    boot_ok = True
+                    break
     else:
         print("  ERROR: Cannot reach Lepton over I2C. Check SDA/SCL wiring.")
 

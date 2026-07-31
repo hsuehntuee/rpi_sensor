@@ -258,32 +258,30 @@ class LeptonVoSPI:
                     b0 = raw_bytes[idx]
                     b1 = raw_bytes[idx + 1]
 
-                    if (b0 & 0x0F) == 0x0F:
+                    is_discard = ((b0 & 0x0F) == 0x0F) or (b1 >= self.height)
+                    if is_discard:
                         discard_streak += 1
                         idx += self.PACKET_BYTES
                         continue
 
                     pkt_num = b1
+                    discard_streak = 0
 
-                    if pkt_num < self.height:
-                        discard_streak = 0
-                        if pkt_num == 0 and collected < self.height:
-                            packets = [None] * self.height
-                            collected = 0
+                    if pkt_num == 0 and collected < self.height:
+                        packets = [None] * self.height
+                        collected = 0
 
-                        if packets[pkt_num] is None:
-                            payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
-                            packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                            collected += 1
+                    if packets[pkt_num] is None:
+                        payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
+                        packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                        collected += 1
 
-                            if collected == self.height:
-                                for r in range(self.height):
-                                    raw_frame[r, :] = packets[r]
-                                return raw_frame
+                        if collected == self.height:
+                            for r in range(self.height):
+                                raw_frame[r, :] = packets[r]
+                            return raw_frame
 
-                        idx += self.PACKET_BYTES
-                    else:
-                        idx += 1
+                    idx += self.PACKET_BYTES
 
                 if discard_streak > 500:
                     self._resync(0.5)

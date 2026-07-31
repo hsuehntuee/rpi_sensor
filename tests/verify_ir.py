@@ -127,7 +127,7 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame with dynamic header offset alignment."""
+    """Try to capture a valid 80x60 Lepton 2.x frame."""
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
@@ -141,35 +141,32 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             b0 = raw_bytes[idx]
             b1 = raw_bytes[idx + 1]
             
-            # Discard packet? (Advance by full 164-byte packet, not 1 byte!)
-            if (b0 & 0x0F) == 0x0F:
+            # FLIR Lepton VoSPI Spec: Discard packet if (b0 & 0x0F == 0x0F) OR packet number >= 60 (e.g. 255)
+            is_discard = ((b0 & 0x0F) == 0x0F) or (b1 >= ROWS)
+            if is_discard:
                 discard_streak += 1
                 idx += PACKET_BYTES
                 continue
             
             pkt_num = b1
+            discard_streak = 0
             
-            if pkt_num < ROWS:
-                discard_streak = 0
-                if pkt_num == 0 and collected < ROWS:
-                    packets = [None] * ROWS
-                    collected = 0
+            if pkt_num == 0 and collected < ROWS:
+                packets = [None] * ROWS
+                collected = 0
+            
+            if packets[pkt_num] is None:
+                # Extract 160 payload bytes from exact packet offset `idx`
+                payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
+                packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                collected += 1
                 
-                if packets[pkt_num] is None:
-                    # Extract 160 payload bytes from exact header offset `idx`
-                    payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                    collected += 1
-                    
-                    if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
-                        return np.array(packets, dtype=np.uint16)
-                
-                # Advance forward by 164 bytes for next packet
-                idx += PACKET_BYTES
-            else:
-                # Header byte misaligned, scan 1 byte forward to find packet 0 header
-                idx += 1
+                if collected == ROWS:
+                    print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
+                    return np.array(packets, dtype=np.uint16)
+            
+            # Advance forward by 164 bytes for next packet
+            idx += PACKET_BYTES
 
         # Trigger CS-high resync only if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:

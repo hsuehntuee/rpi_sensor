@@ -161,46 +161,47 @@ def dump_frame_headers(raw: np.ndarray, label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame."""
-    packets = [None] * ROWS
-    collected = 0
+    """Capture a synchronized 80x60 Lepton frame aligned to Packet 0."""
     discard_streak = 0
 
     for attempt in range(max_attempts):
         raw = reader.read_frame_raw()
         
-        for row in range(ROWS):
-            w0 = int(raw[row, 0])
-            header_flags = w0 & 0xFF
-            pkt_num = (w0 >> 8) & 0xFF
-            
-            # Discard packet?
-            if (header_flags & 0x0F) == 0x0F:
-                discard_streak += 1
-                continue
-            
-            discard_streak = 0
-            
-            if pkt_num < ROWS:
-                if pkt_num == 0 and collected < ROWS:
-                    packets = [None] * ROWS
-                    collected = 0
-                
-                if packets[pkt_num] is None:
-                    # Payload: words 2..81, byteswapped for Lepton big-endian thermal values
-                    packets[pkt_num] = raw[row, 2:PACKET_WORDS].byteswap()
-                    collected += 1
-                    
-                    if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
-                        frame = np.array(packets, dtype=np.uint16)
-                        return frame
+        # Inspect first packet in transfer
+        w0 = int(raw[0, 0])
+        header_flags = w0 & 0xFF
+        pkt_num = (w0 >> 8) & 0xFF
+        
+        # Discard packet?
+        if (header_flags & 0x0F) == 0x0F:
+            discard_streak += 1
+            if discard_streak > 500:
+                print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing...")
+                resync(reader, 0.25)
+                discard_streak = 0
+            continue
+        
+        discard_streak = 0
+        
+        # If raw[0] is not Packet 0, the read started mid-frame; skip to resync frame boundaries
+        if pkt_num != 0:
+            continue
 
-        # Only trigger CS-high resync if we see continuous discards for over 500 packets
-        if discard_streak > 500:
-            print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing...")
-            resync(reader, 0.25)
-            discard_streak = 0
+        # Verify that all 60 packets in this transfer are valid and sequential 0..59
+        valid_frame = True
+        packets = []
+        for row in range(ROWS):
+            w = int(raw[row, 0])
+            hf = w & 0xFF
+            pn = (w >> 8) & 0xFF
+            if (hf & 0x0F) == 0x0F or pn != row:
+                valid_frame = False
+                break
+            packets.append(raw[row, 2:PACKET_WORDS].byteswap())
+
+        if valid_frame:
+            print(f"    Attempt {attempt+1}: PERFECT SYNC! Full 60-packet synchronized frame captured!")
+            return np.array(packets, dtype=np.uint16)
 
     return None
 

@@ -300,42 +300,42 @@ class LeptonVoSPI:
 
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
-            packets = [None] * self.height
-            collected = 0
             discard_streak = 0
 
             for attempt in range(max_retries):
                 raw = self._read_frame_raw()
+                
+                # Check first packet header
+                w0 = int(raw[0, 0])
+                header_flags = w0 & 0xFF
+                pkt_num = (w0 >> 8) & 0xFF
+
+                if (header_flags & 0x0F) == 0x0F:
+                    discard_streak += 1
+                    if discard_streak > 500:
+                        self._resync(0.25)
+                        discard_streak = 0
+                    continue
+
+                discard_streak = 0
+
+                # Must align to Packet 0 at row 0
+                if pkt_num != 0:
+                    continue
+
+                valid = True
                 for row in range(self.rows_per_read):
-                    w0 = int(raw[row, 0])
-                    header_flags = w0 & 0xFF
-                    pkt_num = (w0 >> 8) & 0xFF
+                    w = int(raw[row, 0])
+                    hb = w & 0xFF
+                    lb = (w >> 8) & 0xFF
+                    if (hb & 0x0F) == 0x0F or lb != row:
+                        valid = False
+                        break
 
-                    if (header_flags & 0x0F) == 0x0F:
-                        discard_streak += 1
-                        continue
+                if valid:
+                    return raw[:, 2:2 + self.width].byteswap()
 
-                    discard_streak = 0
-
-                    if pkt_num < self.height:
-                        if pkt_num == 0 and collected < self.height:
-                            packets = [None] * self.height
-                            collected = 0
-
-                        if packets[pkt_num] is None:
-                            packets[pkt_num] = raw[row, 2:2 + self.width].byteswap()
-                            collected += 1
-
-                            if collected == self.height:
-                                for r in range(self.height):
-                                    raw_frame[r, :] = packets[r]
-                                return raw_frame
-
-                if discard_streak > 500:
-                    self._resync(0.25)
-                    discard_streak = 0
-
-            raise RuntimeError("Timed out waiting for Lepton 2.x frame")
+            raise RuntimeError("Timed out waiting for synchronized Lepton 2.x frame")
 
         else:
             # ── Lepton 3.x: 4 segments × 60 packets ──

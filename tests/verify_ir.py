@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 # Add project root to sys.path so we can import src
@@ -7,6 +8,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 try:
     from src.sensors.camera_ir import probe_lepton, PiIRCamera
     from smbus2 import SMBus, i2c_msg
+    from src.config import load_settings
 except ImportError as err:
     print(f"Error importing modules: {err}")
     print("Please make sure you are running this from the project root directory.")
@@ -31,6 +33,17 @@ def main() -> None:
     print("      FLIR Lepton IR Camera Test Script           ")
     print("==================================================")
     
+    # Load settings from .env
+    env_width, env_height = None, None
+    try:
+        settings = load_settings()
+        env_width = settings.lepton_width
+        env_height = settings.lepton_height
+        if env_width is not None and env_height is not None:
+            print(f"Loaded config from .env: LEPTON_WIDTH={env_width}, LEPTON_HEIGHT={env_height}")
+    except Exception as exc:
+        print(f"Info: Could not load .env settings file: {exc}")
+
     # 1. Probe the camera over I2C CCI
     print("\n[1/2] Probing Lepton CCI (I2C bus 1, address 0x2A)...")
     
@@ -68,8 +81,11 @@ def main() -> None:
     test_resolutions = []
     if model is not None:
         test_resolutions = [(model.width, model.height, model.family)]
+    elif env_width is not None and env_height is not None:
+        # Prioritize the user's configured dimensions from .env
+        test_resolutions = [(env_width, env_height, "Configured in .env")]
     else:
-        # Try common Lepton resolutions if I2C query returned zeros
+        # Fallback list if nothing is set
         test_resolutions = [
             (160, 120, "Lepton 3.x (Fallback)"),
             (80, 60, "Lepton 2.x (Fallback)")
@@ -77,7 +93,10 @@ def main() -> None:
 
     spi_success = False
     for width, height, name in test_resolutions:
-        print(f"\n  Trying SPI capture with resolution {width}x{height} ({name})...")
+        # Give the Lepton SPI interface time (CS high) to reset between attempts
+        print(f"\n  Waiting 250ms for Lepton SPI interface to settle...")
+        time.sleep(0.25)
+        print(f"  Trying SPI capture with resolution {width}x{height} ({name})...")
         try:
             cam = PiIRCamera(
                 image_dir=image_dir,

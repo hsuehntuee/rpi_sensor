@@ -389,6 +389,34 @@ class LeptonVoSPI:
 
 
 
+def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") -> np.ndarray:
+    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow)."""
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    if colormap == "ironbow":
+        # Professional thermal Ironbow: Purple -> Blue -> Red -> Orange -> Yellow -> White
+        r = np.clip(np.linspace(-255, 510, 256), 0, 255)
+        g = np.clip(np.linspace(-510, 510, 256), 0, 255)
+        b = np.clip(np.linspace(510, -510, 256), 0, 255)
+        lut[:, 0] = r.astype(np.uint8)
+        lut[:, 1] = g.astype(np.uint8)
+        lut[:, 2] = b.astype(np.uint8)
+    elif colormap == "rainbow":
+        # Classic Rainbow/Jet colormap
+        x = np.linspace(0, 1, 256)
+        r = np.clip(1.5 - np.abs(x * 4 - 3), 0, 1) * 255
+        g = np.clip(1.5 - np.abs(x * 4 - 2), 0, 1) * 255
+        b = np.clip(1.5 - np.abs(x * 4 - 1), 0, 1) * 255
+        lut[:, 0] = r.astype(np.uint8)
+        lut[:, 1] = g.astype(np.uint8)
+        lut[:, 2] = b.astype(np.uint8)
+    else:
+        # Grayscale
+        lut[:, 0] = np.arange(256, dtype=np.uint8)
+        lut[:, 1] = np.arange(256, dtype=np.uint8)
+        lut[:, 2] = np.arange(256, dtype=np.uint8)
+    return lut[scaled_uint8]
+
+
 class PiIRCamera(RGBCamera):
     """FLIR Lepton IR Camera adapter using SPI (VoSPI) and PIL/numpy to save JPEG."""
 
@@ -399,8 +427,10 @@ class PiIRCamera(RGBCamera):
         spi_device: int = 0,
         width: int = 80,
         height: int = 60,
+        colormap: str = "ironbow",
     ) -> None:
         self.vospi = LeptonVoSPI(spi_bus, spi_device, width, height)
+        self.colormap = colormap
         super().__init__(image_dir, self._capture, image_type="ir")
 
     def _capture(self, path: Path) -> None:
@@ -417,8 +447,13 @@ class PiIRCamera(RGBCamera):
             else:
                 scaled = np.zeros(raw_frame.shape, dtype=np.uint8)
 
-            img = Image.fromarray(scaled, mode="L")
-            img.save(path, format="JPEG", quality=90)
+            if self.colormap == "gray":
+                img = Image.fromarray(scaled, mode="L")
+            else:
+                rgb_array = apply_thermal_colormap(scaled, colormap=self.colormap)
+                img = Image.fromarray(rgb_array, mode="RGB")
+
+            img.save(path, format="JPEG", quality=95)
         finally:
             self.vospi.close()
 

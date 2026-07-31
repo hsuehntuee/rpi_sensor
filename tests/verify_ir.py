@@ -205,6 +205,34 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
     return None
 
 
+def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") -> np.ndarray:
+    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow)."""
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    if colormap == "ironbow":
+        # Professional thermal Ironbow: Purple -> Blue -> Red -> Orange -> Yellow -> White
+        r = np.clip(np.linspace(-255, 510, 256), 0, 255)
+        g = np.clip(np.linspace(-510, 510, 256), 0, 255)
+        b = np.clip(np.linspace(510, -510, 256), 0, 255)
+        lut[:, 0] = r.astype(np.uint8)
+        lut[:, 1] = g.astype(np.uint8)
+        lut[:, 2] = b.astype(np.uint8)
+    elif colormap == "rainbow":
+        # Classic Rainbow/Jet colormap
+        x = np.linspace(0, 1, 256)
+        r = np.clip(1.5 - np.abs(x * 4 - 3), 0, 1) * 255
+        g = np.clip(1.5 - np.abs(x * 4 - 2), 0, 1) * 255
+        b = np.clip(1.5 - np.abs(x * 4 - 1), 0, 1) * 255
+        lut[:, 0] = r.astype(np.uint8)
+        lut[:, 1] = g.astype(np.uint8)
+        lut[:, 2] = b.astype(np.uint8)
+    else:
+        # Grayscale
+        lut[:, 0] = np.arange(256, dtype=np.uint8)
+        lut[:, 1] = np.arange(256, dtype=np.uint8)
+        lut[:, 2] = np.arange(256, dtype=np.uint8)
+    return lut[scaled_uint8]
+
+
 def main() -> None:
     print("=" * 60)
     print("      FLIR Lepton IR Camera Test Script (ioctl mode)")
@@ -276,9 +304,7 @@ def main() -> None:
         image_dir = Path(".")
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    filename = f"{timestamp}_ir.jpg"
-    save_path = image_dir / filename
-
+    
     f_min = frame.min()
     f_max = frame.max()
     print(f"  Frame stats: min={f_min}, max={f_max}, shape={frame.shape}")
@@ -288,11 +314,24 @@ def main() -> None:
     else:
         scaled = np.zeros(frame.shape, dtype=np.uint8)
 
-    img = Image.fromarray(scaled, mode="L")
-    img.save(str(save_path), format="JPEG", quality=90)
-    print(f"\n  SUCCESS: Saved thermal image to {save_path}")
+    # Save Grayscale image
+    filename_gray = f"{timestamp}_ir_gray.jpg"
+    save_path_gray = image_dir / filename_gray
+    img_gray = Image.fromarray(scaled, mode="L")
+    img_gray.save(save_path_gray, format="JPEG", quality=95)
+
+    # Save Ironbow Color Thermal image
+    filename_color = f"{timestamp}_ir_color.jpg"
+    save_path_color = image_dir / filename_color
+    rgb_array = apply_thermal_colormap(scaled, colormap="ironbow")
+    img_color = Image.fromarray(rgb_array, mode="RGB")
+    img_color.save(save_path_color, format="JPEG", quality=95)
+
+    print(f"\n  SUCCESS: Saved Grayscale thermal image to {save_path_gray}")
+    print(f"  SUCCESS: Saved Ironbow COLOR thermal image to {save_path_color}")
+
     if image_dir == Path("/data"):
-        print(f"  Host path: ./data/{filename}")
+        print(f"  Host path: ./data/{filename_gray}")
 
     print("\n" + "=" * 60)
     print("            Test Completed Successfully")

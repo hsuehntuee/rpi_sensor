@@ -428,9 +428,11 @@ class PiIRCamera(RGBCamera):
         width: int = 80,
         height: int = 60,
         colormap: str = "ironbow",
+        upscale_factor: int = 8,
     ) -> None:
         self.vospi = LeptonVoSPI(spi_bus, spi_device, width, height)
         self.colormap = colormap
+        self.upscale_factor = upscale_factor
         super().__init__(image_dir, self._capture, image_type="ir")
 
     def _capture(self, path: Path) -> None:
@@ -452,6 +454,11 @@ class PiIRCamera(RGBCamera):
             else:
                 rgb_array = apply_thermal_colormap(scaled, colormap=self.colormap)
                 img = Image.fromarray(rgb_array, mode="RGB")
+
+            if self.upscale_factor > 1:
+                new_w = self.vospi.width * self.upscale_factor
+                new_h = self.vospi.height * self.upscale_factor
+                img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
 
             img.save(path, format="JPEG", quality=95)
         finally:

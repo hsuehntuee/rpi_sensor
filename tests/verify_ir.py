@@ -314,18 +314,20 @@ def main() -> None:
     else:
         scaled = np.zeros(frame.shape, dtype=np.uint8)
 
-    # Save Grayscale image
+    # Save Grayscale image (upscaled 8x to 640x480 for clear HD viewing)
     filename_gray = f"{timestamp}_ir_gray.jpg"
     save_path_gray = image_dir / filename_gray
     img_gray = Image.fromarray(scaled, mode="L")
-    img_gray.save(save_path_gray, format="JPEG", quality=95)
+    img_gray_hd = img_gray.resize((640, 480), Image.Resampling.BICUBIC)
+    img_gray_hd.save(save_path_gray, format="JPEG", quality=95)
 
-    # Save Ironbow Color Thermal image
+    # Save Ironbow Color Thermal image (upscaled 8x to 640x480 HD)
     filename_color = f"{timestamp}_ir_color.jpg"
     save_path_color = image_dir / filename_color
     rgb_array = apply_thermal_colormap(scaled, colormap="ironbow")
     img_color = Image.fromarray(rgb_array, mode="RGB")
-    img_color.save(save_path_color, format="JPEG", quality=95)
+    img_color_hd = img_color.resize((640, 480), Image.Resampling.BICUBIC)
+    img_color_hd.save(save_path_color, format="JPEG", quality=95)
 
     print(f"\n  SUCCESS: Saved Grayscale thermal image to {save_path_gray}")
     print(f"  SUCCESS: Saved Ironbow COLOR thermal image to {save_path_color}")

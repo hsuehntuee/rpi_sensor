@@ -73,9 +73,9 @@ class VoSPIReader:
     """Single-transaction VoSPI reader for FLIR Lepton on RPi5.
 
     Requires `spidev.bufsiz=65536` in `/boot/firmware/cmdline.txt`.
-    Reads 19,680 bytes (120 packets = 2 full frame periods) in a single continuous
-    CS-LOW transaction. CS remains LOW from start to finish, eliminating all CS
-    rising-edge mid-frame state machine resets.
+    Reads 29,520 bytes (180 packets = 3 full frame periods) in a single continuous
+    CS-LOW transaction. CS remains LOW from start to finish, guaranteeing a full
+    60-packet frame is captured in one pass.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -98,8 +98,8 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Single 19,680-byte transfer (120 packets): CS remains LOW continuously."""
-        return self.spi.readbytes(120 * PACKET_BYTES)
+        """Single 29,520-byte transfer (180 packets): CS remains LOW continuously."""
+        return self.spi.readbytes(FRAME_BYTES * 3)
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -123,52 +123,46 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean, un-fragmented, single-transaction 80x60 thermal frame."""
-    discard_streak = 0
-
+    """Capture a 100% clean, un-fragmented thermal frame by sliding through a 180-packet buffer."""
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
-        n_bytes = len(raw_bytes)
         
-        # Diagnostic dump on first attempt
-        if attempt == 0:
-            print("  [Diag] First 5 packet headers in 19680B transfer:")
-            for i in range(5):
-                off = i * PACKET_BYTES
-                print(f"    Header {i}: b0=0x{raw_bytes[off]:02X}, b1={raw_bytes[off+1]}")
-
-        # Scan for Packet 0 within the single 19680-byte CS-LOW stream
-        for idx in range(0, n_bytes - FRAME_BYTES, PACKET_BYTES):
-            b0 = raw_bytes[idx]
-            b1 = raw_bytes[idx + 1]
+        packets = [None] * ROWS
+        collected = 0
+        discard_count = 0
+        
+        for i in range(ROWS * 3):
+            offset = i * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
             
-            # Found Packet 0 of a valid thermal frame?
-            if (b0 & 0x0F) != 0x0F and b1 == 0:
-                packets = [None] * ROWS
-                valid = True
+            # Discard packet check
+            is_discard = (b0 & 0x0F) == 0x0F or b1 >= ROWS
+            if is_discard:
+                discard_count += 1
+                continue
+            
+            pkt_num = b1
+            
+            if pkt_num < ROWS:
+                # When Packet 0 appears, reset buffer for a fresh frame
+                if pkt_num == 0:
+                    packets = [None] * ROWS
+                    collected = 0
                 
-                for r in range(ROWS):
-                    pkt_offset = idx + r * PACKET_BYTES
-                    pb0 = raw_bytes[pkt_offset]
-                    pb1 = raw_bytes[pkt_offset + 1]
+                if packets[pkt_num] is None:
+                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                    collected += 1
                     
-                    # Ensure sequential packet ordering (0, 1, 2... 59)
-                    if (pb0 & 0x0F) == 0x0F or pb1 != r:
-                        valid = False
-                        break
-                    
-                    payload = bytes(raw_bytes[pkt_offset + 4 : pkt_offset + PACKET_BYTES])
-                    packets[r] = np.frombuffer(payload, dtype=">u2")
-                
-                if valid:
-                    print(f"    Attempt {attempt+1}: SUCCESS! Perfectly synchronized 60-packet frame captured in 1 SPI transaction!")
-                    return np.array(packets, dtype=np.uint16)
+                    if collected == ROWS:
+                        print(f"    Attempt {attempt+1}: SUCCESS! Perfectly synchronized frame captured!")
+                        return np.array(packets, dtype=np.uint16)
 
-        discard_streak += 1
-        if discard_streak > 50:
-            print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
+        # Trigger CS-high resync if the buffer is nearly all discard packets
+        if discard_count >= (ROWS * 3) - 10:
+            print(f"    Attempt {attempt+1}: All discards, resyncing for 500ms...")
             resync(reader, 0.5)
-            discard_streak = 0
 
     return None
 

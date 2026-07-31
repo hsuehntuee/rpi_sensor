@@ -238,7 +238,7 @@ class LeptonVoSPI:
             res.extend(self.spi.xfer2(tx))
         return res
 
-    def read_frame(self, max_retries: int = 150) -> np.ndarray:
+    def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
         if self.spi is None:

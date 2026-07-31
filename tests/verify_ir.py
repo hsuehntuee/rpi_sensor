@@ -224,14 +224,14 @@ def main() -> None:
     dump_frame_headers(raw_bytes, "[Diag]")
 
     # ── Step 3: Attempt to capture valid frame ──
-    print("\n[3/3] Attempting to capture a valid thermal frame...")
+    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 5 seconds)...")
     resync(reader, 0.2)
     
-    frame = try_capture(reader, max_attempts=40)
+    frame = try_capture(reader, max_attempts=1500)
     reader.close()
 
     if frame is None:
-        print("\n  ERROR: Could not capture a valid frame after 40 attempts.")
+        print("\n  ERROR: Could not capture a valid frame after 1500 attempts (~5s).")
         print("\nSuggestions:")
         print("  - Verify /boot/firmware/config.txt has dtparam=spi=on")
         print("  - Verify there is NO dtoverlay=nospi10 in config.txt")

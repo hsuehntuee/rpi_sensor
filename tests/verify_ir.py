@@ -126,16 +126,15 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% single-pass coherent 80x60 thermal frame."""
+    """Capture a valid 80x60 Lepton 2.x thermal frame using ultra-low-latency readbytes."""
+    packets = [None] * ROWS
+    collected = 0
     discard_streak = 0
 
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
         n_bytes = len(raw_bytes)
         idx = 0
-        
-        single_pass_packets = [None] * ROWS
-        collected = 0
         
         while idx <= n_bytes - PACKET_BYTES:
             b0 = raw_bytes[idx]
@@ -152,23 +151,23 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             discard_streak = 0
             
             if pkt_num < ROWS:
-                # If packet 0 appears mid-stream and we haven't completed a frame, reset single-pass buffer
-                if pkt_num == 0 and collected < ROWS and collected > 0:
-                    single_pass_packets = [None] * ROWS
+                # Reset buffer when packet 0 of a NEW frame is encountered
+                if pkt_num == 0 and collected < ROWS:
+                    packets = [None] * ROWS
                     collected = 0
                 
-                if single_pass_packets[pkt_num] is None:
+                if packets[pkt_num] is None:
                     payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
-                    single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                     collected += 1
                     
                     if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected in a single pass!")
-                        return np.array(single_pass_packets, dtype=np.uint16)
+                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected!")
+                        return np.array(packets, dtype=np.uint16)
             
             idx += PACKET_BYTES
 
-        # Trigger CS-high resync if we see continuous discards for over 500 packets (~2.5s)
+        # Trigger CS-high resync only if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)

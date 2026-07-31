@@ -239,7 +239,7 @@ class LeptonVoSPI:
             cs_change = 1 if i == (self.rows_per_read - 1) else 0
             self._XFER.pack_into(
                 self._msg_buf, i * msg_sz,
-                self._tx.ctypes.data,
+                0,   # tx_buf = 0 (read-only transfer)
                 self._rx.ctypes.data + self.PACKET_BYTES * i,
                 self.PACKET_BYTES,
                 self.spi_speed,

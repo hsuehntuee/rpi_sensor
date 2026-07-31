@@ -239,26 +239,28 @@ class LeptonVoSPI:
 
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
+            packets = [None] * self.height
+            collected = 0
+            discard_streak = 0
+
             for attempt in range(max_retries):
                 raw_bytes = self._read_frame_bytes()
                 n_packets = len(raw_bytes) // self.PACKET_BYTES
-                packets = [None] * self.height
-                collected = 0
-                discard_count = 0
 
                 for i in range(n_packets):
                     offset = i * self.PACKET_BYTES
                     b0 = raw_bytes[offset]
                     b1 = raw_bytes[offset + 1]
 
-                    is_discard = (b0 & 0x0F) == 0x0F or b1 >= self.height
-                    if is_discard:
-                        discard_count += 1
+                    if (b0 & 0x0F) == 0x0F or b1 >= self.height:
+                        discard_streak += 1
                         continue
 
                     pkt_num = b1
+                    discard_streak = 0
+
                     if pkt_num < self.height:
-                        if pkt_num == 0:
+                        if pkt_num == 0 and collected < self.height:
                             packets = [None] * self.height
                             collected = 0
 
@@ -272,8 +274,9 @@ class LeptonVoSPI:
                                     raw_frame[r, :] = packets[r]
                                 return raw_frame
 
-                if n_packets > 0 and discard_count >= n_packets - 10:
+                if discard_streak > 500:
                     self._resync(0.5)
+                    discard_streak = 0
 
             raise RuntimeError("Timed out waiting for Lepton 2.x frame")
 

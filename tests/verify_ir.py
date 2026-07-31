@@ -123,36 +123,35 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean, un-fragmented thermal frame by sliding through a large SPI buffer."""
+    """Capture a 100% clean thermal frame by accumulating 4096-byte kernel chunks seamlessly."""
+    packets = [None] * ROWS
+    collected = 0
+    discard_streak = 0
+
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
         n_bytes = len(raw_bytes)
         n_packets = n_bytes // PACKET_BYTES
         
         if attempt == 0:
-            print(f"  [Diag] SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
+            print(f"  [Diag] Kernel SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
         
-        packets = [None] * ROWS
-        collected = 0
-        discard_count = 0
-        
-        # Safely loop through available packets
         for i in range(n_packets):
             offset = i * PACKET_BYTES
             b0 = raw_bytes[offset]
             b1 = raw_bytes[offset + 1]
             
             # Discard packet check
-            is_discard = (b0 & 0x0F) == 0x0F or b1 >= ROWS
-            if is_discard:
-                discard_count += 1
+            if (b0 & 0x0F) == 0x0F or b1 >= ROWS:
+                discard_streak += 1
                 continue
             
             pkt_num = b1
+            discard_streak = 0
             
             if pkt_num < ROWS:
-                # When Packet 0 appears, reset buffer for a fresh frame
-                if pkt_num == 0:
+                # Reset buffer when packet 0 of a NEW frame is encountered
+                if pkt_num == 0 and collected < ROWS:
                     packets = [None] * ROWS
                     collected = 0
                 
@@ -162,13 +161,14 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected += 1
                     
                     if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! Perfectly synchronized frame captured!")
+                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected seamlessly!")
                         return np.array(packets, dtype=np.uint16)
 
-        # Trigger CS-high resync if the buffer is nearly all discard packets
-        if n_packets > 0 and discard_count >= n_packets - 10:
-            print(f"    Attempt {attempt+1}: All discards, resyncing for 500ms...")
+        # Trigger CS-high resync ONLY if we see continuous discards for over 500 packets (~2.5s)
+        if discard_streak > 500:
+            print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)
+            discard_streak = 0
 
     return None
 

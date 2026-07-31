@@ -226,8 +226,11 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_bytes(self) -> list[int]:
-        """Single 29,520-byte transfer (180 packets): CS remains LOW continuously."""
-        return self.spi.readbytes(self.height * self.PACKET_BYTES * 3)
+        """Perform 3 readbytes transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        r1 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
+        r2 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
+        r3 = self.spi.readbytes(12 * self.PACKET_BYTES)  # 1968 bytes
+        return r1 + r2 + r3
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:

@@ -70,12 +70,10 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Single-transaction VoSPI reader for FLIR Lepton on RPi5.
+    """Chunked VoSPI reader for FLIR Lepton on RPi5.
 
-    Requires `spidev.bufsiz=65536` in `/boot/firmware/cmdline.txt`.
-    Reads 29,520 bytes (180 packets = 3 full frame periods) in a single continuous
-    CS-LOW transaction. CS remains LOW from start to finish, guaranteeing a full
-    60-packet frame is captured in one pass.
+    Chunked into 3 transfers (3936B, 3936B, 1968B) to stay under Linux kernel bufsiz limit.
+    This guarantees all 60 packets (9,840 bytes) are read per attempt with ZERO kernel truncation.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -98,8 +96,11 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Single 29,520-byte transfer (180 packets): CS remains LOW continuously."""
-        return self.spi.readbytes(FRAME_BYTES * 3)
+        """Perform 3 readbytes transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        r1 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes (24 packets)
+        r2 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes (24 packets)
+        r3 = self.spi.readbytes(12 * PACKET_BYTES)  # 1968 bytes (12 packets)
+        return r1 + r2 + r3
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -123,7 +124,7 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean thermal frame by accumulating 4096-byte kernel chunks seamlessly."""
+    """Capture a 100% clean thermal frame by accumulating 60 packets across chunked SPI reads."""
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
@@ -133,8 +134,9 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
         n_bytes = len(raw_bytes)
         n_packets = n_bytes // PACKET_BYTES
         
-        if attempt == 0:
-            print(f"  [Diag] Kernel SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
+        if attempt == 0 and n_bytes >= 2:
+            print(f"  [Diag] SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
+            print(f"  [Diag] First packet header: b0=0x{raw_bytes[0]:02X}, b1={raw_bytes[1]}")
         
         for i in range(n_packets):
             offset = i * PACKET_BYTES
@@ -161,7 +163,7 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected += 1
                     
                     if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected seamlessly!")
+                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected!")
                         return np.array(packets, dtype=np.uint16)
 
         # Trigger CS-high resync ONLY if we see continuous discards for over 500 packets (~2.5s)

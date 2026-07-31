@@ -72,9 +72,9 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 class VoSPIReader:
     """Communication class for FLIR Lepton module on SPI.
 
-    Chunks 60 packets into 6 ioctl calls of 10 packets each (1640B payload).
-    Each ioctl payload is <= 1640 bytes, satisfying kernel bufsiz limits down to 2048B.
-    CS stays low for packets 0..58, and is de-asserted (HIGH) on packet 59.
+    Chunks 60 packets into 6 ioctl calls. Each ioctl contains 1 single transfer
+    struct of 1640 bytes (10 packets). This prevents RP1 driver reconfiguration
+    delays between individual packets and eliminates interlaced line artifacts.
     """
 
     XFER_STRUCT = struct.Struct("=QQIIHBBI")
@@ -94,34 +94,30 @@ class VoSPIReader:
         msg_size = self.XFER_STRUCT.size
         
         self._msg_bufs = []
-        self._ioc_cmds = []
+        # Standard pylepton ioctl command for a single 32-byte transfer struct
+        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
         
         for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
-            buf_bytes = msg_size * num_pkts
-            buf = np.zeros(buf_bytes, dtype=np.uint8)
+            buf = np.zeros(msg_size, dtype=np.uint8)
             is_last_chunk = (chunk_idx == len(self.chunks) - 1)
+            cs_change = 1 if is_last_chunk else 0
             
-            for i in range(num_pkts):
-                global_pkt = start_pkt + i
-                is_last_pkt = is_last_chunk and (i == num_pkts - 1)
-                cs_change = 1 if is_last_pkt else 0
-                rx_ptr = self._capture_buf.ctypes.data + PACKET_BYTES * global_pkt
-                
-                self.XFER_STRUCT.pack_into(
-                    buf, i * msg_size,
-                    0,                                                         # tx_buf = 0 (read-only)
-                    rx_ptr,                                                    # rx_buf
-                    PACKET_BYTES,                                              # len (164 bytes)
-                    self.speed,                                                # speed_hz
-                    0,                                                         # delay_usecs
-                    8,                                                         # bits_per_word
-                    cs_change,                                                 # cs_change
-                    0,                                                         # pad
-                )
+            rx_ptr = self._capture_buf.ctypes.data + PACKET_BYTES * start_pkt
+            chunk_bytes = PACKET_BYTES * num_pkts
+            
+            self.XFER_STRUCT.pack_into(
+                buf, 0,
+                0,                                                             # tx_buf = 0 (read-only)
+                rx_ptr,                                                        # rx_buf pointer to chunk start
+                chunk_bytes,                                                   # len (1640 bytes for 10 packets)
+                self.speed,                                                    # speed_hz
+                0,                                                             # delay_usecs
+                8,                                                             # bits_per_word
+                cs_change,                                                     # cs_change (1 for last chunk)
+                0,                                                             # pad
+            )
             
             self._msg_bufs.append(buf)
-            cmd = _IOC(1, SPI_IOC_MAGIC, 0, buf_bytes)
-            self._ioc_cmds.append(cmd)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)
@@ -135,9 +131,9 @@ class VoSPIReader:
             self.fd = -1
 
     def read_frame_raw(self) -> np.ndarray:
-        """Issue 6 chunked ioctl calls (10 pkts each). CS stays low across all 60 pkts."""
-        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
-            fcntl.ioctl(self.fd, cmd, buf)
+        """Issue 6 ioctl calls (1640B continuous transfers each)."""
+        for buf in self._msg_bufs:
+            fcntl.ioctl(self.fd, self._spi_ioc_msg, buf)
         return self._capture_buf.copy()
 
 

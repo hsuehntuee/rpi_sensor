@@ -98,6 +98,7 @@ class VoSPIReader:
         # RX buffer for one full frame
         self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
         # Single transfer struct for the entire 9840-byte frame (60 packets * 164 bytes)
+        msg_size = self.XFER_STRUCT.size
         self._msg_buf = np.zeros(msg_size, dtype=np.uint8)
         self.XFER_STRUCT.pack_into(
             self._msg_buf, 0,

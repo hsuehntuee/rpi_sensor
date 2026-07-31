@@ -61,7 +61,12 @@ def main() -> None:
 
     model = None
     try:
-        model = probe_lepton(bus_number=1, address=0x2A)
+        model = probe_lepton(
+            bus_number=1,
+            address=0x2A,
+            fallback_width=env_width,
+            fallback_height=env_height
+        )
         print(f"  SUCCESS: Detected {model.family}")
         print(f"  Details: Part Number = {model.part_number}")
         print(f"  Resolution: {model.width}x{model.height}")

@@ -199,7 +199,7 @@ class LeptonVoSPI:
             raise ImportError("spidev module is not available on this platform")
         self.spi = spidev.SpiDev()
         self.spi.open(self.spi_bus, self.spi_device)
-        self.spi.max_speed_hz = 20000000
+        self.spi.max_speed_hz = 8000000
         self.spi.mode = 3
 
     def close(self) -> None:

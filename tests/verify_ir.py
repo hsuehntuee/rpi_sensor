@@ -214,8 +214,37 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
     return None
 
 
+def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool = True) -> np.ndarray:
+    """Convert raw 14-bit Lepton pixels directly into absolute Celsius temperatures (°C).
+    
+    For Lepton 2.5 Radiometric mode (TLinear Enabled):
+    1 LSB = 0.01 Kelvin (10 mK).
+    Formula: Celsius = (raw / 100.0) - 273.15
+    """
+    raw_float = raw_frame.astype(np.float32)
+    if is_tlinear:
+        celsius = (raw_float / 100.0) - 273.15
+    else:
+        # Fallback estimation for non-TLinear raw counts (~40 LSB / °C centered at 25°C)
+        celsius = 25.0 + (raw_float - 8192.0) / 40.0
+    return celsius
+
+
+def render_fixed_range_frame(celsius_frame: np.ndarray, min_temp: float = 18.0,
+                               max_temp: float = 36.0, colormap: str = "ironbow") -> np.ndarray:
+    """Render thermal image using FIXED absolute temperature boundaries (e.g. 18°C to 36°C).
+    
+    18.0°C or colder -> 0 (Deep Blue / Black)
+    36.0°C or hotter -> 255 (Bright Red / White)
+    Absolute fixed mapping — NO background dynamic normalization!
+    """
+    clipped = np.clip(celsius_frame, min_temp, max_temp)
+    scaled_uint8 = ((clipped - min_temp) / (max_temp - min_temp) * 255.0).astype(np.uint8)
+    return apply_thermal_colormap(scaled_uint8, colormap)
+
+
 def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") -> np.ndarray:
-    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow / BlackHot / WhiteHot)."""
+    """Map 8-bit thermal frame to RGB color palette (Ironbow / Rainbow / BlackHot / WhiteHot)."""
     lut = np.zeros((256, 3), dtype=np.uint8)
     if colormap == "ironbow":
         # Professional thermal Ironbow: Purple -> Blue -> Red -> Orange -> Yellow -> White
@@ -350,35 +379,42 @@ def main() -> None:
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     
-    # ── 1. Print Raw Row Diagnostics ──
+    # ── 1. Absolute Temperature Conversion (°C) ──
     clean_frame = frame & 0x3FFF
-    print(f"\n  [Diag] Raw Row 0 (first 5 px): {clean_frame[0, :5]}")
-    print(f"  [Diag] Raw Row 1 (first 5 px): {clean_frame[1, :5]}")
-    print(f"  [Diag] Raw Row 2 (first 5 px): {clean_frame[2, :5]}")
-    print(f"  [Diag] Raw Row 3 (first 5 px): {clean_frame[3, :5]}")
+    celsius_frame = raw_to_celsius(clean_frame, is_tlinear=True)
+    c_min = celsius_frame.min()
+    c_max = celsius_frame.max()
+    c_avg = celsius_frame.mean()
+    print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
-    # ── 2. Human Face Thermal Enhancer (5th-95th Percentile Dynamic Clipping) ──
+    # ── 2. Fixed 18°C to 36°C Range Rendering (NO Background Scaling) ──
+    rgb_fixed_18_36 = render_fixed_range_frame(celsius_frame, min_temp=18.0, max_temp=36.0, colormap="ironbow")
+    rgb_fixed_18_36 = np.fliplr(rgb_fixed_18_36)
+    
+    filename_fixed = f"{timestamp}_ir_fixed_18_36c.jpg"
+    save_path_fixed = image_dir / filename_fixed
+    img_fixed = Image.fromarray(rgb_fixed_18_36, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
+    img_fixed.save(save_path_fixed, format="JPEG", quality=95)
+    print(f"  SUCCESS: Saved Fixed 18°C-36°C Thermal image to {save_path_fixed}")
+
+    # ── 3. Dynamic Human Face Thermal Enhancer ──
     p_min = np.percentile(clean_frame, 5)
     p_max = np.percentile(clean_frame, 95)
-    print(f"  Clean 14-bit frame stats: raw_min={clean_frame.min()}, raw_max={clean_frame.max()}, p5={p_min:.0f}, p95={p_max:.0f}")
-
     if p_max > p_min:
         clipped = np.clip(clean_frame, p_min, p_max)
         scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
     else:
         scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
-    # Horizontal Flip (Mirror correction for natural face preview)
     scaled = np.fliplr(scaled)
 
-    # ── 3. De-striping Filter (Removes alternating row VoSPI noise) ──
+    # ── 4. De-striping Filter ──
     destriped = scaled.copy()
-    # Compute 3x3 median filter manually to remove horizontal zebra line noise
     for r in range(1, ROWS - 1):
         for c in range(1, COLS - 1):
             destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
 
-    # 1. White Hot (Classic Medical Thermal Grayscale)
+    # 1. White Hot
     filename_whitehot = f"{timestamp}_ir_whitehot.jpg"
     save_path_whitehot = image_dir / filename_whitehot
     img_whitehot = Image.fromarray(scaled, mode="L").resize((640, 480), Image.Resampling.BICUBIC)

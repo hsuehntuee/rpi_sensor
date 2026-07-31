@@ -226,11 +226,8 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_bytes(self) -> list[int]:
-        """Perform 3 readbytes calls (3936B, 3936B, 1968B) under 4096 limit in 2us."""
-        r1 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
-        r2 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
-        r3 = self.spi.readbytes(12 * self.PACKET_BYTES)  # 1968 bytes
-        return r1 + r2 + r3
+        """Single 9840-byte transfer: CS remains LOW continuously for all 60 packets."""
+        return self.spi.readbytes(self.height * self.PACKET_BYTES)
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:
@@ -242,44 +239,34 @@ class LeptonVoSPI:
 
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
-            packets = [None] * self.height
-            collected = 0
             discard_streak = 0
 
             for attempt in range(max_retries):
                 raw_bytes = self._read_frame_bytes()
-                n_bytes = len(raw_bytes)
-                idx = 0
+                packets = [None] * self.height
+                collected = 0
 
-                while idx <= n_bytes - self.PACKET_BYTES:
-                    b0 = raw_bytes[idx]
-                    b1 = raw_bytes[idx + 1]
+                for r in range(self.height):
+                    offset = r * self.PACKET_BYTES
+                    b0 = raw_bytes[offset]
+                    b1 = raw_bytes[offset + 1]
 
-                    is_discard = ((b0 & 0x0F) == 0x0F) or (b1 >= self.height)
-                    if is_discard:
+                    if (b0 & 0x0F) == 0x0F or b1 >= self.height:
                         discard_streak += 1
-                        idx += self.PACKET_BYTES
-                        continue
+                        break
 
                     pkt_num = b1
-                    discard_streak = 0
+                    if pkt_num == r:
+                        payload = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
+                        packets[r] = np.frombuffer(payload, dtype=">u2")
+                        collected += 1
+                    else:
+                        break
 
-                    if pkt_num < self.height:
-                        if pkt_num == 0 and collected < self.height:
-                            packets = [None] * self.height
-                            collected = 0
-
-                        if packets[pkt_num] is None:
-                            payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
-                            packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                            collected += 1
-
-                            if collected == self.height:
-                                for r in range(self.height):
-                                    raw_frame[r, :] = packets[r]
-                                return raw_frame
-
-                    idx += self.PACKET_BYTES
+                if collected == self.height:
+                    for r in range(self.height):
+                        raw_frame[r, :] = packets[r]
+                    return raw_frame
 
                 if discard_streak > 500:
                     self._resync(0.5)

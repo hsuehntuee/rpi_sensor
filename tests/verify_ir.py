@@ -70,12 +70,11 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Ultra-low-latency VoSPI reader for FLIR Lepton on RPi5.
+    """Single-transaction VoSPI reader for FLIR Lepton on RPi5.
 
-    Uses spidev.readbytes() in C memory space to reduce inter-chunk CS pause
-    from 400 microseconds down to 2 microseconds. This stays well below Lepton's
-    185-microsecond timeout threshold, keeping Lepton 100% synchronized across
-    all 60 packets.
+    Requires `spidev.bufsiz=65536` in `/boot/firmware/cmdline.txt`.
+    CS remains LOW continuously for all 9,840 bytes (60 packets), eliminating
+    any rising-edge mid-frame state machine resets on the Lepton core.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -98,11 +97,8 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Perform 3 readbytes calls (3936B, 3936B, 1968B) under 4096 limit in 2us."""
-        r1 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes
-        r2 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes
-        r3 = self.spi.readbytes(12 * PACKET_BYTES)  # 1968 bytes
-        return r1 + r2 + r3
+        """Single 9840-byte transfer: CS remains LOW continuously for all 60 packets."""
+        return self.spi.readbytes(FRAME_BYTES)
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -126,48 +122,39 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a valid 80x60 Lepton 2.x thermal frame using ultra-low-latency readbytes."""
-    packets = [None] * ROWS
-    collected = 0
+    """Capture a 100% clean, un-fragmented, single-transaction 80x60 thermal frame."""
     discard_streak = 0
 
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
-        n_bytes = len(raw_bytes)
-        idx = 0
+        packets = [None] * ROWS
+        collected = 0
         
-        while idx <= n_bytes - PACKET_BYTES:
-            b0 = raw_bytes[idx]
-            b1 = raw_bytes[idx + 1]
+        for r in range(ROWS):
+            offset = r * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
             
             # Discard packet?
-            is_discard = ((b0 & 0x0F) == 0x0F) or (b1 >= ROWS)
-            if is_discard:
+            if (b0 & 0x0F) == 0x0F or b1 >= ROWS:
                 discard_streak += 1
-                idx += PACKET_BYTES
-                continue
+                break
             
             pkt_num = b1
-            discard_streak = 0
-            
-            if pkt_num < ROWS:
-                # Reset buffer when packet 0 of a NEW frame is encountered
-                if pkt_num == 0 and collected < ROWS:
-                    packets = [None] * ROWS
-                    collected = 0
-                
-                if packets[pkt_num] is None:
-                    payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                    collected += 1
-                    
-                    if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected!")
-                        return np.array(packets, dtype=np.uint16)
-            
-            idx += PACKET_BYTES
+            # Check sequential VoSPI packet ordering
+            if pkt_num == r:
+                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                packets[r] = np.frombuffer(payload, dtype=">u2")
+                collected += 1
+            else:
+                # Discard packet misalignment
+                break
 
-        # Trigger CS-high resync only if we see continuous discards for over 500 packets (~2.5s)
+        if collected == ROWS:
+            print(f"    Attempt {attempt+1}: SUCCESS! Perfectly synchronized 60-packet frame captured in 1 SPI transaction!")
+            return np.array(packets, dtype=np.uint16)
+
+        # Trigger CS-high resync if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)

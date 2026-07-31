@@ -226,8 +226,8 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_bytes(self) -> list[int]:
-        """Single 9840-byte transfer: CS remains LOW continuously for all 60 packets."""
-        return self.spi.readbytes(self.height * self.PACKET_BYTES)
+        """Single 19,680-byte transfer (120 packets): CS remains LOW continuously."""
+        return self.spi.readbytes(120 * self.PACKET_BYTES)
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:
@@ -240,35 +240,39 @@ class LeptonVoSPI:
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
             discard_streak = 0
+            frame_bytes_len = self.height * self.PACKET_BYTES
 
             for attempt in range(max_retries):
                 raw_bytes = self._read_frame_bytes()
-                packets = [None] * self.height
-                collected = 0
+                n_bytes = len(raw_bytes)
 
-                for r in range(self.height):
-                    offset = r * self.PACKET_BYTES
-                    b0 = raw_bytes[offset]
-                    b1 = raw_bytes[offset + 1]
+                for idx in range(0, n_bytes - frame_bytes_len, self.PACKET_BYTES):
+                    b0 = raw_bytes[idx]
+                    b1 = raw_bytes[idx + 1]
 
-                    if (b0 & 0x0F) == 0x0F or b1 >= self.height:
-                        discard_streak += 1
-                        break
+                    if (b0 & 0x0F) != 0x0F and b1 == 0:
+                        packets = [None] * self.height
+                        valid = True
 
-                    pkt_num = b1
-                    if pkt_num == r:
-                        payload = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
-                        packets[r] = np.frombuffer(payload, dtype=">u2")
-                        collected += 1
-                    else:
-                        break
+                        for r in range(self.height):
+                            pkt_offset = idx + r * self.PACKET_BYTES
+                            pb0 = raw_bytes[pkt_offset]
+                            pb1 = raw_bytes[pkt_offset + 1]
 
-                if collected == self.height:
-                    for r in range(self.height):
-                        raw_frame[r, :] = packets[r]
-                    return raw_frame
+                            if (pb0 & 0x0F) == 0x0F or pb1 != r:
+                                valid = False
+                                break
 
-                if discard_streak > 500:
+                            payload = bytes(raw_bytes[pkt_offset + 4 : pkt_offset + self.PACKET_BYTES])
+                            packets[r] = np.frombuffer(payload, dtype=">u2")
+
+                        if valid:
+                            for r in range(self.height):
+                                raw_frame[r, :] = packets[r]
+                            return raw_frame
+
+                discard_streak += 1
+                if discard_streak > 50:
                     self._resync(0.5)
                     discard_streak = 0
 

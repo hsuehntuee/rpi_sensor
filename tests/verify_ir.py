@@ -50,7 +50,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 20_000_000         # 20 MHz (Official FLIR Lepton VoSPI speed)
+SPI_SPEED    = 10_000_000         # 10 MHz (Rock-solid signal timing for RPi5 jumper wires)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 
@@ -276,8 +276,12 @@ def main() -> None:
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     
-    # ── 1. 14-Bit Masking ──
+    # ── 1. Print Raw Row Diagnostics ──
     clean_frame = frame & 0x3FFF
+    print(f"\n  [Diag] Raw Row 0 (first 5 px): {clean_frame[0, :5]}")
+    print(f"  [Diag] Raw Row 1 (first 5 px): {clean_frame[1, :5]}")
+    print(f"  [Diag] Raw Row 2 (first 5 px): {clean_frame[2, :5]}")
+    print(f"  [Diag] Raw Row 3 (first 5 px): {clean_frame[3, :5]}")
     
     # ── 2. Human Face Thermal Enhancer (5th-95th Percentile Dynamic Clipping) ──
     p_min = np.percentile(clean_frame, 5)
@@ -293,35 +297,41 @@ def main() -> None:
     # Horizontal Flip (Mirror correction for natural face preview)
     scaled = np.fliplr(scaled)
 
+    # ── 3. De-striping Filter (Removes alternating row VoSPI noise) ──
+    destriped = scaled.copy()
+    # Compute 3x3 median filter manually to remove horizontal zebra line noise
+    for r in range(1, ROWS - 1):
+        for c in range(1, COLS - 1):
+            destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
+
     # 1. White Hot (Classic Medical Thermal Grayscale)
     filename_whitehot = f"{timestamp}_ir_whitehot.jpg"
     save_path_whitehot = image_dir / filename_whitehot
     img_whitehot = Image.fromarray(scaled, mode="L").resize((640, 480), Image.Resampling.BICUBIC)
     img_whitehot.save(save_path_whitehot, format="JPEG", quality=95)
 
-    # 2. Black Hot (Hotter skin is darker)
-    filename_blackhot = f"{timestamp}_ir_blackhot.jpg"
-    save_path_blackhot = image_dir / filename_blackhot
-    rgb_blackhot = apply_thermal_colormap(scaled, colormap="blackhot")
-    img_blackhot = Image.fromarray(rgb_blackhot, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
-    img_blackhot.save(save_path_blackhot, format="JPEG", quality=95)
+    # 2. De-striped White Hot (Smooth Face Contour, Zero Zebra Stripes!)
+    filename_destriped = f"{timestamp}_ir_destriped.jpg"
+    save_path_destriped = image_dir / filename_destriped
+    img_destriped = Image.fromarray(destriped, mode="L").resize((640, 480), Image.Resampling.BICUBIC)
+    img_destriped.save(save_path_destriped, format="JPEG", quality=95)
 
     # 3. Ironbow (Standard Thermal Color)
     filename_ironbow = f"{timestamp}_ir_ironbow.jpg"
     save_path_ironbow = image_dir / filename_ironbow
-    rgb_ironbow = apply_thermal_colormap(scaled, colormap="ironbow")
+    rgb_ironbow = apply_thermal_colormap(destriped, colormap="ironbow")
     img_ironbow = Image.fromarray(rgb_ironbow, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
     img_ironbow.save(save_path_ironbow, format="JPEG", quality=95)
 
     # 4. Rainbow (High Contrast Palette)
     filename_rainbow = f"{timestamp}_ir_rainbow.jpg"
     save_path_rainbow = image_dir / filename_rainbow
-    rgb_rainbow = apply_thermal_colormap(scaled, colormap="rainbow")
+    rgb_rainbow = apply_thermal_colormap(destriped, colormap="rainbow")
     img_rainbow = Image.fromarray(rgb_rainbow, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
     img_rainbow.save(save_path_rainbow, format="JPEG", quality=95)
 
     print(f"\n  SUCCESS: Saved White-Hot Thermal image to {save_path_whitehot}")
-    print(f"  SUCCESS: Saved Black-Hot Thermal image to {save_path_blackhot}")
+    print(f"  SUCCESS: Saved De-striped Smooth Face image to {save_path_destriped}")
     print(f"  SUCCESS: Saved Ironbow Thermal image to {save_path_ironbow}")
     print(f"  SUCCESS: Saved Rainbow Thermal image to {save_path_rainbow}")
 

@@ -12,6 +12,7 @@ import os
 import struct
 import sys
 import time
+import subprocess
 from pathlib import Path
 
 # Add project root to sys.path so we can import src

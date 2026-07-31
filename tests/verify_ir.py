@@ -97,25 +97,20 @@ class VoSPIReader:
         self._tx = np.zeros(PACKET_WORDS, dtype=np.uint16)
         # RX buffer for one full frame
         self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-        # Pre-build the ioctl message buffer (60 spi_ioc_transfer structs)
-        msg_size = self.XFER_STRUCT.size
-        self._msg_buf = np.zeros(msg_size * ROWS, dtype=np.uint8)
-        for i in range(ROWS):
-            cs_change = 1 if i == (ROWS - 1) else 0
-            self.XFER_STRUCT.pack_into(
-                self._msg_buf, i * msg_size,
-                0,                                                     # tx_buf = 0 (read-only transfer)
-                self._rx.ctypes.data + PACKET_BYTES * i,               # rx_buf
-                PACKET_BYTES,                                          # len
-                self.speed,                                            # speed_hz
-                0,                                                     # delay_usecs
-                8,                                                     # bits_per_word
-                cs_change,                                             # cs_change (1 for last packet)
-                0,                                                     # pad
-            )
-        # ioctl request code for SPI_IOC_MESSAGE(ROWS): size must be total bytes for all 60 structs
-        total_ioc_bytes = msg_size * ROWS
-        self._spi_ioc_msg = _IOC(1, SPI_IOC_MAGIC, 0, total_ioc_bytes)
+        # Single transfer struct for the entire 9840-byte frame (60 packets * 164 bytes)
+        self._msg_buf = np.zeros(msg_size, dtype=np.uint8)
+        self.XFER_STRUCT.pack_into(
+            self._msg_buf, 0,
+            0,                                                     # tx_buf = 0 (read-only)
+            self._rx.ctypes.data,                                  # rx_buf = start of 9840-byte rx array
+            FRAME_BYTES,                                           # len = 9840 bytes
+            self.speed,                                            # speed_hz
+            0,                                                     # delay_usecs
+            8,                                                     # bits_per_word
+            1,                                                     # cs_change = 1 (toggle CS HIGH at end)
+            0,                                                     # pad
+        )
+        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)

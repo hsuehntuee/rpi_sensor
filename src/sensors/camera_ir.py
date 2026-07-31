@@ -227,30 +227,27 @@ class LeptonVoSPI:
         self._WR_MODE  = self._iow(M, 1, "=B")
         self._WR_BPW   = self._iow(M, 3, "=B")
         self._WR_SPEED = self._iow(M, 4, "=I")
+        self._IOC_MSG  = self._iow(M, 0, self._XFER.format)
         
         # Pre-allocate buffers
         self._tx = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._rx = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
         
-        # Build multi-message ioctl buffer
+        # Single 9840-byte transfer struct for the entire frame
+        frame_bytes = self.rows_per_read * self.PACKET_BYTES
         msg_sz = self._XFER.size
-        total_ioc_bytes = msg_sz * self.rows_per_read
-        self._IOC_MSG = self._ioc(1, M, 0, total_ioc_bytes)
-
-        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
-        for i in range(self.rows_per_read):
-            cs_change = 1 if i == (self.rows_per_read - 1) else 0
-            self._XFER.pack_into(
-                self._msg_buf, i * msg_sz,
-                0,   # tx_buf = 0 (read-only transfer)
-                self._rx.ctypes.data + self.PACKET_BYTES * i,
-                self.PACKET_BYTES,
-                self.spi_speed,
-                0,   # delay_usecs
-                8,   # bits_per_word
-                cs_change,   # cs_change (1 for last packet)
-                0,   # pad
-            )
+        self._msg_buf = np.zeros(msg_sz, dtype=np.uint8)
+        self._XFER.pack_into(
+            self._msg_buf, 0,
+            0,                                     # tx_buf = 0 (read-only)
+            self._rx.ctypes.data,                  # rx_buf
+            frame_bytes,                           # len = 9840 bytes
+            self.spi_speed,                        # speed_hz
+            0,                                     # delay_usecs
+            8,                                     # bits_per_word
+            1,                                     # cs_change = 1 (toggle CS HIGH at end)
+            0,                                     # pad
+        )
 
     def open(self) -> None:
         import os as _os, fcntl as _fcntl

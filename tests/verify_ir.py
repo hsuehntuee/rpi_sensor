@@ -154,57 +154,48 @@ def dump_frame_headers(raw: np.ndarray, label: str = ""):
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 20) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame.
-    
-    Returns a 60x80 uint16 raw thermal array, or None on failure.
-    """
+def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | None:
+    """Try to capture a valid 80x60 Lepton 2.x frame."""
+    packets = [None] * ROWS
+    collected = 0
+    discard_streak = 0
+
     for attempt in range(max_attempts):
         raw = reader.read_frame_raw()
         
-        # Check first packet
-        w0 = int(raw[0, 0])
-        b0 = (w0 >> 8) & 0xFF
-        b1 = w0 & 0xFF
-        is_discard = (b0 & 0x0F) == 0x0F
-        
-        if is_discard:
-            if attempt < 3 or attempt % 5 == 0:
-                print(f"    Attempt {attempt+1}: discard frame, resyncing...")
-            resync(reader, 0.2)
-            continue
-        
-        # Check if this looks like a valid frame (packet 0 should be first)
-        pkt0 = b1
-        if pkt0 != 0:
-            if attempt < 3:
-                print(f"    Attempt {attempt+1}: first packet is #{pkt0}, not #0. Resyncing...")
-            resync(reader, 0.2)
-            continue
-        
-        # Verify packet sequence
-        valid = True
         for row in range(ROWS):
-            w = int(raw[row, 0])
-            hb = (w >> 8) & 0xFF
-            lb = w & 0xFF
-            if (hb & 0x0F) == 0x0F:
-                valid = False
-                break
-            if lb != row:
-                valid = False
-                break
-        
-        if valid:
-            print(f"    Attempt {attempt+1}: VALID frame captured!")
-            # Extract pixel data (skip 2-word header per packet)
-            frame = raw[:, 2:].copy()
-            return frame
-        else:
-            if attempt < 3:
-                print(f"    Attempt {attempt+1}: packet sequence invalid, resyncing...")
+            w0 = int(raw[row, 0])
+            b0 = (w0 >> 8) & 0xFF
+            b1 = w0 & 0xFF
+            
+            # Discard packet?
+            if (b0 & 0x0F) == 0x0F:
+                discard_streak += 1
+                continue
+            
+            discard_streak = 0
+            pkt_num = b1
+            
+            if pkt_num < ROWS:
+                if pkt_num == 0 and collected < ROWS:
+                    # New frame sequence starting
+                    packets = [None] * ROWS
+                    collected = 0
+                
+                if packets[pkt_num] is None:
+                    packets[pkt_num] = raw[row, 2:PACKET_WORDS].copy()
+                    collected += 1
+                    
+                    if collected == ROWS:
+                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
+                        frame = np.array(packets, dtype=np.uint16)
+                        return frame
+
+        if discard_streak > 120:
+            print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing...")
             resync(reader, 0.2)
-    
+            discard_streak = 0
+
     return None
 
 

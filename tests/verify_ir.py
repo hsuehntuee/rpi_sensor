@@ -97,21 +97,30 @@ class VoSPIReader:
         self._tx = np.zeros(PACKET_WORDS, dtype=np.uint16)
         # RX buffer for one full frame
         self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-        # Single transfer struct for the entire 9840-byte frame (60 packets * 164 bytes)
+        # 3 transfers of 20 packets each (20 * 164 = 3280 bytes <= 4096 bufsiz limit)
+        NUM_BATCHES = 3
+        PKTS_PER_BATCH = ROWS // NUM_BATCHES  # 20
+        BATCH_BYTES = PKTS_PER_BATCH * PACKET_BYTES  # 3280 bytes
+        
         msg_size = self.XFER_STRUCT.size
-        self._msg_buf = np.zeros(msg_size, dtype=np.uint8)
-        self.XFER_STRUCT.pack_into(
-            self._msg_buf, 0,
-            0,                                                     # tx_buf = 0 (read-only)
-            self._rx.ctypes.data,                                  # rx_buf = start of 9840-byte rx array
-            FRAME_BYTES,                                           # len = 9840 bytes
-            self.speed,                                            # speed_hz
-            0,                                                     # delay_usecs
-            8,                                                     # bits_per_word
-            1,                                                     # cs_change = 1 (toggle CS HIGH at end)
-            0,                                                     # pad
-        )
-        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
+        total_ioc_bytes = msg_size * NUM_BATCHES
+        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
+        
+        for b in range(NUM_BATCHES):
+            cs_change = 1 if b == (NUM_BATCHES - 1) else 0
+            rx_ptr = self._rx.ctypes.data + BATCH_BYTES * b
+            self.XFER_STRUCT.pack_into(
+                self._msg_buf, b * msg_size,
+                0,                                                     # tx_buf = 0 (read-only)
+                rx_ptr,                                                # rx_buf offset
+                BATCH_BYTES,                                           # len = 3280 bytes
+                self.speed,                                            # speed_hz
+                0,                                                     # delay_usecs
+                8,                                                     # bits_per_word
+                cs_change,                                             # cs_change (1 for last batch)
+                0,                                                     # pad
+            )
+        self._spi_ioc_msg = _IOC(1, SPI_IOC_MAGIC, 0, total_ioc_bytes)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)

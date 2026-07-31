@@ -233,21 +233,30 @@ class LeptonVoSPI:
         self._tx = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._rx = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
         
-        # Single 9840-byte transfer struct for the entire frame
-        frame_bytes = self.rows_per_read * self.PACKET_BYTES
+        # Chunk frame into 3 batches of 20 packets (3280 bytes each <= 4096 bufsiz limit)
+        num_batches = 3
+        pkts_per_batch = self.rows_per_read // num_batches
+        batch_bytes = pkts_per_batch * self.PACKET_BYTES  # 3280 bytes
+        
         msg_sz = self._XFER.size
-        self._msg_buf = np.zeros(msg_sz, dtype=np.uint8)
-        self._XFER.pack_into(
-            self._msg_buf, 0,
-            0,                                     # tx_buf = 0 (read-only)
-            self._rx.ctypes.data,                  # rx_buf
-            frame_bytes,                           # len = 9840 bytes
-            self.spi_speed,                        # speed_hz
-            0,                                     # delay_usecs
-            8,                                     # bits_per_word
-            1,                                     # cs_change = 1 (toggle CS HIGH at end)
-            0,                                     # pad
-        )
+        total_ioc_bytes = msg_sz * num_batches
+        self._IOC_MSG = self._ioc(1, M, 0, total_ioc_bytes)
+        
+        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
+        for b in range(num_batches):
+            cs_change = 1 if b == (num_batches - 1) else 0
+            rx_ptr = self._rx.ctypes.data + batch_bytes * b
+            self._XFER.pack_into(
+                self._msg_buf, b * msg_sz,
+                0,                                     # tx_buf = 0 (read-only)
+                rx_ptr,                                # rx_buf
+                batch_bytes,                           # len = 3280 bytes
+                self.spi_speed,                        # speed_hz
+                0,                                     # delay_usecs
+                8,                                     # bits_per_word
+                cs_change,                             # cs_change (1 for last batch)
+                0,                                     # pad
+            )
 
     def open(self) -> None:
         import os as _os, fcntl as _fcntl

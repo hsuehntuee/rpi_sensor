@@ -113,8 +113,9 @@ class VoSPIReader:
                 cs_change,                                             # cs_change (1 for last packet)
                 0,                                                     # pad
             )
-        # ioctl request code for SPI_IOC_MESSAGE(ROWS)
-        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
+        # ioctl request code for SPI_IOC_MESSAGE(ROWS): size must be total bytes for all 60 structs
+        total_ioc_bytes = msg_size * ROWS
+        self._spi_ioc_msg = _IOC(1, SPI_IOC_MAGIC, 0, total_ioc_bytes)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)

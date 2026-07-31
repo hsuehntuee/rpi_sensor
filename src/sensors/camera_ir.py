@@ -227,14 +227,17 @@ class LeptonVoSPI:
         self._WR_MODE  = self._iow(M, 1, "=B")
         self._WR_BPW   = self._iow(M, 3, "=B")
         self._WR_SPEED = self._iow(M, 4, "=I")
-        self._IOC_MSG  = self._iow(M, 0, self._XFER.format)
-
+        
         # Pre-allocate buffers
         self._tx = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._rx = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
+        
         # Build multi-message ioctl buffer
         msg_sz = self._XFER.size
-        self._msg_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
+        total_ioc_bytes = msg_sz * self.rows_per_read
+        self._IOC_MSG = self._ioc(1, M, 0, total_ioc_bytes)
+
+        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
         for i in range(self.rows_per_read):
             cs_change = 1 if i == (self.rows_per_read - 1) else 0
             self._XFER.pack_into(

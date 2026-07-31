@@ -22,6 +22,7 @@ try:
     from src.config import load_settings
     import numpy as np
     from PIL import Image
+    import spidev
 except ImportError as err:
     print(f"Error importing modules: {err}")
     sys.exit(1)

@@ -178,14 +178,26 @@ except ImportError:
 
 
 class LeptonVoSPI:
-    """16-bit VoSPI frame accumulator for FLIR Lepton 2.x and 3.x.
+    """16-bit VoSPI frame accumulator for FLIR Lepton 2.x and 3.x using pylepton ioctl method.
 
-    Uses native spidev.xfer2() to read entire frames in a single C call,
-    keeping CS asserted across all packets.
+    Packs 60 spi_ioc_transfer structs into a single buffer and issues one ioctl
+    with _IOW(SPI_IOC_MAGIC, 0, "=QQIIHBBI"). CS stays low for packets 0..58,
+    and is de-asserted (HIGH) on packet 59.
     """
 
     PACKET_WORDS = 82          # 80 pixels + 2 header words
     PACKET_BYTES = 164         # 82 * 2
+    XFER_STRUCT = struct.Struct("=QQIIHBBI")
+
+    @staticmethod
+    def _ioc(direction, itype, nr, size):
+        return (direction << 30) | (itype << 8) | nr | (size << 16)
+
+    @staticmethod
+    def _iow(itype, nr, fmt):
+        return LeptonVoSPI._ioc(1, itype, nr, struct.calcsize(fmt))
+
+    _SPI_IOC_MAGIC = ord("k")
 
     def __init__(
         self,
@@ -194,36 +206,56 @@ class LeptonVoSPI:
         width: int = 80,
         height: int = 60,
     ) -> None:
-        self.spi_bus = spi_bus
-        self.spi_device = spi_device
+        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
         self.width = width
         self.height = height
         self.rows_per_read = height if width <= 80 else 60
+        self.fd = -1
         self.is_lepton3 = (width * height) > 4800
         self.spi_speed = 20_000_000   # 20 MHz (Official FLIR Lepton speed)
         self.spi_mode = 3             # CPOL=1, CPHA=1
-        self.spi = None
-        if self.rows_per_read <= 24:
-            self._tx_chunks = [[0] * (self.rows_per_read * self.PACKET_BYTES)]
-        else:
-            self._tx_chunks = [
-                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
-                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
-                [0] * (12 * self.PACKET_BYTES),  # 1968 bytes
-            ]
+
+        # Compute ioctl constants matching pylepton
+        M = self._SPI_IOC_MAGIC
+        self._WR_MODE  = self._iow(M, 1, "=B")
+        self._WR_BPW   = self._iow(M, 3, "=B")
+        self._WR_SPEED = self._iow(M, 4, "=I")
+        self._IOC_MSG  = self._iow(M, 0, self.XFER_STRUCT.format)
+
+        # Buffers
+        self._txbuf = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
+        self._capture_buf = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
+
+        # Pre-build spi_ioc_transfer structs (32 * rows_per_read bytes)
+        msg_sz = self.XFER_STRUCT.size
+        self._xmit_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
+
+        for i in range(self.rows_per_read):
+            cs_change = 1 if i == (self.rows_per_read - 1) else 0
+            self.XFER_STRUCT.pack_into(
+                self._xmit_buf, i * msg_sz,
+                self._txbuf.ctypes.data,                                         # tx_buf
+                self._capture_buf.ctypes.data + self.PACKET_BYTES * i,            # rx_buf
+                self.PACKET_BYTES,                                               # len (164 bytes)
+                self.spi_speed,                                                  # speed_hz
+                0,                                                               # delay_usecs
+                8,                                                               # bits_per_word
+                cs_change,                                                       # cs_change
+                0,                                                               # pad
+            )
 
     def open(self) -> None:
-        if spidev is None:
-            raise ImportError("spidev module is not available on this platform")
-        self.spi = spidev.SpiDev()
-        self.spi.open(self.spi_bus, self.spi_device)
-        self.spi.max_speed_hz = self.spi_speed
-        self.spi.mode = self.spi_mode
+        import os as _os, fcntl as _fcntl
+        self.fd = _os.open(self.dev_path, _os.O_RDWR)
+        _fcntl.ioctl(self.fd, self._WR_MODE,  struct.pack("=B", self.spi_mode))
+        _fcntl.ioctl(self.fd, self._WR_BPW,   struct.pack("=B", 8))
+        _fcntl.ioctl(self.fd, self._WR_SPEED,  struct.pack("=I", self.spi_speed))
 
     def close(self) -> None:
-        if self.spi is not None:
-            self.spi.close()
-            self.spi = None
+        if self.fd >= 0:
+            import os as _os
+            _os.close(self.fd)
+            self.fd = -1
 
     def _resync(self, delay: float = 0.2) -> None:
         """VoSPI resync: CS high for ≥185 ms."""
@@ -231,17 +263,16 @@ class LeptonVoSPI:
         time.sleep(delay)
         self.open()
 
-    def _read_frame_bytes(self) -> list[int]:
-        """Perform chunked xfer2 transfers (each <= 4096 bytes)."""
-        res = []
-        for tx in self._tx_chunks:
-            res.extend(self.spi.xfer2(tx))
-        return res
+    def _read_frame_raw(self) -> np.ndarray:
+        """Issue pylepton ioctl call (CS low until last packet)."""
+        import fcntl as _fcntl
+        _fcntl.ioctl(self.fd, self._IOC_MSG, self._xmit_buf)
+        return self._capture_buf.copy()
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
-        if self.spi is None:
+        if self.fd < 0:
             self.open()
 
         raw_frame = np.zeros((self.height, self.width), dtype=np.uint16)
@@ -253,18 +284,17 @@ class LeptonVoSPI:
             discard_streak = 0
 
             for attempt in range(max_retries):
-                raw_bytes = self._read_frame_bytes()
+                raw = self._read_frame_raw()
                 for row in range(self.rows_per_read):
-                    offset = row * self.PACKET_BYTES
-                    b0 = raw_bytes[offset]
-                    b1 = raw_bytes[offset + 1]
+                    w0 = int(raw[row, 0])
+                    header_flags = w0 & 0xFF
+                    pkt_num = (w0 >> 8) & 0xFF
 
-                    if (b0 & 0x0F) == 0x0F:
+                    if (header_flags & 0x0F) == 0x0F:
                         discard_streak += 1
                         continue
 
                     discard_streak = 0
-                    pkt_num = b1
 
                     if pkt_num < self.height:
                         if pkt_num == 0 and collected < self.height:
@@ -272,8 +302,7 @@ class LeptonVoSPI:
                             collected = 0
 
                         if packets[pkt_num] is None:
-                            payload_bytes = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
-                            packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                            packets[pkt_num] = raw[row, 2:2 + self.width].byteswap()
                             collected += 1
 
                             if collected == self.height:
@@ -291,16 +320,17 @@ class LeptonVoSPI:
             # ── Lepton 3.x: 4 segments × 60 packets ──
             segments_data = {}
             for attempt in range(max_retries * 4):
-                raw_bytes = self._read_frame_bytes()
-                b0_first = raw_bytes[0]
-                if (b0_first & 0x0F) == 0x0F:
+                raw = self._read_frame_raw()
+                w0 = int(raw[0, 0])
+                header_flags = w0 & 0xFF
+                if (header_flags & 0x0F) == 0x0F:
                     self._resync(0.2)
                     segments_data.clear()
                     continue
 
                 # Read segment id from packet 20
-                offset20 = 20 * self.PACKET_BYTES
-                seg_id = (raw_bytes[offset20] >> 4) & 0x07
+                w20 = int(raw[20, 0])
+                seg_id = ((w20 >> 8) >> 4) & 0x07
                 if seg_id < 1 or seg_id > 4:
                     self._resync(0.2)
                     segments_data.clear()
@@ -308,32 +338,29 @@ class LeptonVoSPI:
 
                 # Validate packet sequence
                 valid = True
-                seg_packets = []
                 for row in range(60):
-                    off = row * self.PACKET_BYTES
-                    hb = raw_bytes[off]
-                    lb = raw_bytes[off + 1]
+                    w = int(raw[row, 0])
+                    hb = w & 0xFF
+                    lb = (w >> 8) & 0xFF
                     if (hb & 0x0F) == 0x0F or lb != row:
                         valid = False
                         break
-                    p_bytes = bytes(raw_bytes[off + 4 : off + self.PACKET_BYTES])
-                    seg_packets.append(np.frombuffer(p_bytes, dtype=">u2"))
 
                 if not valid:
                     self._resync(0.2)
                     segments_data.clear()
                     continue
 
-                segments_data[seg_id] = seg_packets
+                segments_data[seg_id] = raw[:, 2:2 + self.width].byteswap()
 
                 if len(segments_data) == 4:
                     for seg in range(1, 5):
                         base_row = (seg - 1) * 30
-                        s_pkts = segments_data[seg]
+                        s_pixels = segments_data[seg]
                         for p_idx in range(60):
                             row = base_row + (p_idx // 2)
                             col_off = 80 if (p_idx % 2 == 1) else 0
-                            raw_frame[row, col_off:col_off + 80] = s_pkts[p_idx]
+                            raw_frame[row, col_off:col_off + 80] = s_pixels[p_idx, :]
                     return raw_frame
 
             raise RuntimeError("Timed out waiting for Lepton 3.x frame segments")

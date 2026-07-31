@@ -70,66 +70,40 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Rock-solid single-pass 3-struct kernel ioctl VoSPI reader for FLIR Lepton on RPi5.
+    """Read Lepton VoSPI frames using native spidev.xfer2().
 
-    Packs 3 spi_ioc_transfer structs (3936B, 3936B, 1968B) into a 96-byte C message array.
-    Executes in a single fcntl.ioctl call inside Linux C kernel space.
-    - Each transfer is <= 4096 bytes (satisfies kernel bufsiz limit with ZERO Errno 90 errors).
-    - cs_change=0 on structs 0 & 1 keeps CS LOW continuously (ZERO microsecond latency gaps).
-    - Prevents Lepton from entering the 0x1F/0x5F Discard Error State permanently.
+    Chunked into 3 transfers (3936B, 3936B, 1968B) to stay under python spidev 4096 limit.
+    This satisfies Linux kernel bufsiz limit with ZERO Errno 90 errors.
     """
-
-    XFER_STRUCT = struct.Struct("=QQIIHBBI")
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
                  speed: int = SPI_SPEED, mode: int = SPI_MODE):
-        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
+        self.spi_bus = spi_bus
+        self.spi_device = spi_device
         self.speed = speed
         self.mode = mode
-        self.fd = -1
-
-        # Full frame buffer (60 rows x 82 words)
-        self._capture_buf = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-
-        # Build 3 transfer structs: 24 pkts (3936B), 24 pkts (3936B), 12 pkts (1968B)
-        msg_size = self.XFER_STRUCT.size
-        self._xmit_buf = np.zeros(msg_size * 3, dtype=np.uint8)
-
-        chunks = [(0, 24, 0), (24, 24, 0), (48, 12, 1)]  # (start_row, num_rows, cs_change)
-        for idx, (start_row, num_rows, cs_change) in enumerate(chunks):
-            rx_ptr = self._capture_buf.ctypes.data + PACKET_BYTES * start_row
-            chunk_bytes = PACKET_BYTES * num_rows
-
-            self.XFER_STRUCT.pack_into(
-                self._xmit_buf, idx * msg_size,
-                0,                                                             # tx_buf = 0 (read-only)
-                rx_ptr,                                                        # rx_buf pointer
-                chunk_bytes,                                                   # len (<= 3936 bytes)
-                self.speed,                                                    # speed_hz
-                0,                                                             # delay_usecs
-                8,                                                             # bits_per_word
-                cs_change,                                                     # cs_change (0 for 0&1, 1 for 2)
-                0,                                                             # pad
-            )
-
-        # ioctl command for 3 structs (3 * 32 = 96 bytes)
-        self._spi_ioc_msg = _IOC(1, SPI_IOC_MAGIC, 0, msg_size * 3)
+        self.spi = None
+        # 3 chunks: 24 pkts (3936B), 24 pkts (3936B), 12 pkts (1968B)
+        self._tx24 = [0] * (24 * PACKET_BYTES)  # 3936 bytes
+        self._tx12 = [0] * (12 * PACKET_BYTES)  # 1968 bytes
 
     def open(self):
-        self.fd = os.open(self.dev_path, os.O_RDWR)
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MODE, struct.pack("=B", self.mode))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_BITS_PER_WORD, struct.pack("=B", 8))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MAX_SPEED_HZ, struct.pack("=I", self.speed))
+        self.spi = spidev.SpiDev()
+        self.spi.open(self.spi_bus, self.spi_device)
+        self.spi.max_speed_hz = self.speed
+        self.spi.mode = self.mode
 
     def close(self):
-        if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
+        if self.spi is not None:
+            self.spi.close()
+            self.spi = None
 
-    def read_frame_raw(self) -> np.ndarray:
-        """Execute all 3 transfers in ONE single C kernel ioctl pass."""
-        fcntl.ioctl(self.fd, self._spi_ioc_msg, self._xmit_buf)
-        return self._capture_buf.copy()
+    def read_frame_bytes(self) -> list[int]:
+        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        r1 = self.spi.xfer2(self._tx24)
+        r2 = self.spi.xfer2(self._tx24)
+        r3 = self.spi.xfer2(self._tx12)
+        return r1 + r2 + r3
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -139,15 +113,16 @@ def resync(reader: VoSPIReader, delay: float = 0.5):
     reader.open()
 
 
-def dump_frame_headers(raw: np.ndarray, label: str = ""):
-    """Print the first few packet headers from raw uint16 buffer."""
-    print(f"  {label} Packet headers (first 10 of {raw.shape[0]}):")
+def dump_frame_headers(raw_bytes: list[int], label: str = ""):
+    """Print the first few packet headers from raw xfer2 bytes."""
+    print(f"  {label} Packet headers (first 10 of 60):")
     for i in range(min(10, ROWS)):
-        w0 = int(raw[i, 0])
-        header_flags = w0 & 0xFF
-        pkt_num = (w0 >> 8) & 0xFF
-        is_discard = (header_flags & 0x0F) == 0x0F
-        print(f"    Pkt {i:02d}: Flags=0x{header_flags:02X}  "
+        offset = i * PACKET_BYTES
+        b0 = raw_bytes[offset]
+        b1 = raw_bytes[offset + 1]
+        is_discard = (b0 & 0x0F) == 0x0F
+        pkt_num = b1
+        print(f"    Pkt {i:02d}: Flags=0x{b0:02X}  "
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
@@ -158,19 +133,20 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
     discard_streak = 0
 
     for attempt in range(max_attempts):
-        raw = reader.read_frame_raw()
+        raw_bytes = reader.read_frame_bytes()
         
         for row in range(ROWS):
-            w0 = int(raw[row, 0])
-            header_flags = w0 & 0xFF
-            pkt_num = (w0 >> 8) & 0xFF
+            offset = row * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
             
             # Discard packet?
-            if (header_flags & 0x0F) == 0x0F:
+            if (b0 & 0x0F) == 0x0F:
                 discard_streak += 1
                 continue
             
             discard_streak = 0
+            pkt_num = b1
             
             if pkt_num < ROWS:
                 if pkt_num == 0 and collected < ROWS:
@@ -178,8 +154,9 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected = 0
                 
                 if packets[pkt_num] is None:
-                    # Payload: words 2..81, byteswapped for Lepton big-endian thermal values
-                    packets[pkt_num] = raw[row, 2:PACKET_WORDS].byteswap()
+                    # Extract 160 payload bytes -> 80 big-endian uint16 values
+                    payload_bytes = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                     collected += 1
                     
                     if collected == ROWS:
@@ -197,7 +174,7 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
 
 
 def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") -> np.ndarray:
-    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow / Plasma / WhiteHot)."""
+    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow / BlackHot / WhiteHot)."""
     lut = np.zeros((256, 3), dtype=np.uint8)
     if colormap == "ironbow":
         # Professional thermal Ironbow: Purple -> Blue -> Red -> Orange -> Yellow -> White
@@ -223,7 +200,7 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
         lut[:, 1] = inv
         lut[:, 2] = inv
     else:
-        # Grayscale (White Hot - Hotter is brighter)
+        # Grayscale (White Hot)
         lut[:, 0] = np.arange(256, dtype=np.uint8)
         lut[:, 1] = np.arange(256, dtype=np.uint8)
         lut[:, 2] = np.arange(256, dtype=np.uint8)
@@ -232,7 +209,7 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
 
 def main() -> None:
     print("=" * 60)
-    print("      FLIR Lepton IR Camera Test Script (ioctl mode)")
+    print("      FLIR Lepton IR Camera Test Script (spidev mode)")
     print("=" * 60)
 
     # Load settings
@@ -260,8 +237,8 @@ def main() -> None:
     else:
         print("  ERROR: Cannot reach Lepton over I2C. Check SDA/SCL wiring.")
 
-    # ── Step 2: Raw SPI frame read ──
-    print("\n[2/3] Raw SPI frame read (3-struct kernel ioctl, CS held low across 60 packets)...")
+    # ── Step 2: SPI open & hardware resync ──
+    print("\n[2/3] Opening SPI device (/dev/spidev0.0, Mode 3, 20MHz)...")
     reader = VoSPIReader(spi_bus=0, spi_device=0, speed=SPI_SPEED, mode=SPI_MODE)
     try:
         reader.open()
@@ -271,18 +248,11 @@ def main() -> None:
         print("  Check: dtparam=spi=on in /boot/firmware/config.txt and reboot.")
         sys.exit(1)
 
-    # First, do a 500ms resync to guarantee clean Lepton state reset on every run
     print("  Performing VoSPI resync (CS high for 500ms)...")
     resync(reader, 0.5)
 
-    # Read one frame and show headers
-    raw = reader.read_frame_raw()
-    dump_frame_headers(raw, "[Diag]")
-
     # ── Step 3: Attempt to capture valid frame ──
     print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 5 seconds)...")
-    resync(reader, 0.5)
-    
     frame = try_capture(reader, max_attempts=1500)
     reader.close()
 
@@ -302,7 +272,7 @@ def main() -> None:
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     
-    # ── 1. 14-Bit Masking (Remove hardware flag bits on bits 14-15) ──
+    # ── 1. 14-Bit Masking ──
     clean_frame = frame & 0x3FFF
     
     # ── 2. Human Face Thermal Enhancer (5th-95th Percentile Dynamic Clipping) ──

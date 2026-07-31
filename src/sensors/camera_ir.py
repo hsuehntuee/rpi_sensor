@@ -233,30 +233,43 @@ class LeptonVoSPI:
         self._tx = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._rx = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
         
-        # Chunk frame into 3 batches of 20 packets (3280 bytes each <= 4096 bufsiz limit)
-        num_batches = 3
-        pkts_per_batch = self.rows_per_read // num_batches
-        batch_bytes = pkts_per_batch * self.PACKET_BYTES  # 3280 bytes
-        
+        # Chunk frame packets into ioctl calls of at most 24 packets (3936 bytes <= 4096 bufsiz)
+        if self.rows_per_read <= 24:
+            self.chunks = [(0, self.rows_per_read)]
+        else:
+            # 60 rows -> (0,24), (24,24), (48,12)
+            self.chunks = [(0, 24), (24, 24), (48, 12)]
+
         msg_sz = self._XFER.size
-        total_ioc_bytes = msg_sz * num_batches
-        self._IOC_MSG = self._ioc(1, M, 0, total_ioc_bytes)
-        
-        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
-        for b in range(num_batches):
-            cs_change = 1 if b == (num_batches - 1) else 0
-            rx_ptr = self._rx.ctypes.data + batch_bytes * b
-            self._XFER.pack_into(
-                self._msg_buf, b * msg_sz,
-                0,                                     # tx_buf = 0 (read-only)
-                rx_ptr,                                # rx_buf
-                batch_bytes,                           # len = 3280 bytes
-                self.spi_speed,                        # speed_hz
-                0,                                     # delay_usecs
-                8,                                     # bits_per_word
-                cs_change,                             # cs_change (1 for last batch)
-                0,                                     # pad
-            )
+        self._msg_bufs = []
+        self._ioc_cmds = []
+
+        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
+            buf_bytes = msg_sz * num_pkts
+            buf = np.zeros(buf_bytes, dtype=np.uint8)
+            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
+
+            for i in range(num_pkts):
+                global_pkt = start_pkt + i
+                is_last_pkt = is_last_chunk and (i == num_pkts - 1)
+                cs_change = 1 if is_last_pkt else 0
+                rx_ptr = self._rx.ctypes.data + self.PACKET_BYTES * global_pkt
+
+                self._XFER.pack_into(
+                    buf, i * msg_sz,
+                    0,                                     # tx_buf = 0 (read-only)
+                    rx_ptr,                                # rx_buf
+                    self.PACKET_BYTES,                     # len = 164 bytes
+                    self.spi_speed,                        # speed_hz
+                    0,                                     # delay_usecs
+                    8,                                     # bits_per_word
+                    cs_change,                             # cs_change
+                    0,                                     # pad
+                )
+
+            self._msg_bufs.append(buf)
+            cmd = self._ioc(1, M, 0, buf_bytes)
+            self._ioc_cmds.append(cmd)
 
     def open(self) -> None:
         import os as _os, fcntl as _fcntl
@@ -278,9 +291,10 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_raw(self) -> np.ndarray:
-        """One ioctl that reads rows_per_read packets with CS held low."""
+        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all pkts."""
         import fcntl as _fcntl
-        _fcntl.ioctl(self.fd, self._IOC_MSG, self._msg_buf)
+        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
+            _fcntl.ioctl(self.fd, cmd, buf)
         return self._rx
 
     def read_frame(self, max_retries: int = 40) -> np.ndarray:

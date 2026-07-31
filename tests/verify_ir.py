@@ -93,34 +93,43 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.fd = -1
-        # TX buffer (all zeros – we only read)
-        self._tx = np.zeros(PACKET_WORDS, dtype=np.uint16)
-        # RX buffer for one full frame
+        # RX buffer for one full frame (60 x 82 uint16)
         self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-        # 3 transfers of 20 packets each (20 * 164 = 3280 bytes <= 4096 bufsiz limit)
-        NUM_BATCHES = 3
-        PKTS_PER_BATCH = ROWS // NUM_BATCHES  # 20
-        BATCH_BYTES = PKTS_PER_BATCH * PACKET_BYTES  # 3280 bytes
         
+        # 60 packets chunked into 3 ioctl calls: 24 pkts, 24 pkts, 12 pkts
+        # Total bytes per ioctl: 3936, 3936, 1968 (all <= 4096 bufsiz kernel limit)
+        self.chunks = [(0, 24), (24, 24), (48, 12)]
         msg_size = self.XFER_STRUCT.size
-        total_ioc_bytes = msg_size * NUM_BATCHES
-        self._msg_buf = np.zeros(total_ioc_bytes, dtype=np.uint8)
         
-        for b in range(NUM_BATCHES):
-            cs_change = 1 if b == (NUM_BATCHES - 1) else 0
-            rx_ptr = self._rx.ctypes.data + BATCH_BYTES * b
-            self.XFER_STRUCT.pack_into(
-                self._msg_buf, b * msg_size,
-                0,                                                     # tx_buf = 0 (read-only)
-                rx_ptr,                                                # rx_buf offset
-                BATCH_BYTES,                                           # len = 3280 bytes
-                self.speed,                                            # speed_hz
-                0,                                                     # delay_usecs
-                8,                                                     # bits_per_word
-                cs_change,                                             # cs_change (1 for last batch)
-                0,                                                     # pad
-            )
-        self._spi_ioc_msg = _IOC(1, SPI_IOC_MAGIC, 0, total_ioc_bytes)
+        self._msg_bufs = []
+        self._ioc_cmds = []
+        
+        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
+            buf_bytes = msg_size * num_pkts
+            buf = np.zeros(buf_bytes, dtype=np.uint8)
+            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
+            
+            for i in range(num_pkts):
+                global_pkt = start_pkt + i
+                is_last_pkt_overall = is_last_chunk and (i == num_pkts - 1)
+                cs_change = 1 if is_last_pkt_overall else 0
+                rx_ptr = self._rx.ctypes.data + PACKET_BYTES * global_pkt
+                
+                self.XFER_STRUCT.pack_into(
+                    buf, i * msg_size,
+                    0,                                                 # tx_buf = 0 (read-only)
+                    rx_ptr,                                            # rx_buf
+                    PACKET_BYTES,                                      # len = 164 bytes
+                    self.speed,                                        # speed_hz
+                    0,                                                 # delay_usecs
+                    8,                                                 # bits_per_word
+                    cs_change,                                         # cs_change
+                    0,                                                 # pad
+                )
+            
+            self._msg_bufs.append(buf)
+            cmd = _IOC(1, SPI_IOC_MAGIC, 0, buf_bytes)
+            self._ioc_cmds.append(cmd)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)
@@ -134,9 +143,9 @@ class VoSPIReader:
             self.fd = -1
 
     def read_frame_raw(self) -> np.ndarray:
-        """Issue one SPI_IOC_MESSAGE ioctl that reads 60 packets (CS stays low).
-        Returns the raw rx buffer (60 x 82 uint16)."""
-        fcntl.ioctl(self.fd, self._spi_ioc_msg, self._msg_buf)
+        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all 60 pkts."""
+        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
+            fcntl.ioctl(self.fd, cmd, buf)
         return self._rx.copy()
 
 

@@ -141,16 +141,16 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             b0 = raw_bytes[idx]
             b1 = raw_bytes[idx + 1]
             
-            # Discard packet?
+            # Discard packet? (Advance by full 164-byte packet, not 1 byte!)
             if (b0 & 0x0F) == 0x0F:
                 discard_streak += 1
-                idx += 1
+                idx += PACKET_BYTES
                 continue
             
-            discard_streak = 0
             pkt_num = b1
             
             if pkt_num < ROWS:
+                discard_streak = 0
                 if pkt_num == 0 and collected < ROWS:
                     packets = [None] * ROWS
                     collected = 0
@@ -162,15 +162,16 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected += 1
                     
                     if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected with dynamic header alignment!")
+                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
                         return np.array(packets, dtype=np.uint16)
                 
                 # Advance forward by 164 bytes for next packet
                 idx += PACKET_BYTES
             else:
+                # Header byte misaligned, scan 1 byte forward to find packet 0 header
                 idx += 1
 
-        # Trigger CS-high resync if we see continuous discards for over 500 packets
+        # Trigger CS-high resync only if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)

@@ -260,13 +260,13 @@ class LeptonVoSPI:
 
                     if (b0 & 0x0F) == 0x0F:
                         discard_streak += 1
-                        idx += 1
+                        idx += self.PACKET_BYTES
                         continue
 
-                    discard_streak = 0
                     pkt_num = b1
 
                     if pkt_num < self.height:
+                        discard_streak = 0
                         if pkt_num == 0 and collected < self.height:
                             packets = [None] * self.height
                             collected = 0

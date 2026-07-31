@@ -83,7 +83,10 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        self._tx = [0] * (ROWS * PACKET_BYTES)  # 9840 zeros
+        # 3 chunks of zeros: 24 pkts (3936B), 24 pkts (3936B), 12 pkts (1968B)
+        # Each chunk is <= 4096 to prevent Python spidev OverflowError
+        self._tx24 = [0] * (24 * PACKET_BYTES)  # 3936 bytes
+        self._tx12 = [0] * (12 * PACKET_BYTES)  # 1968 bytes
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -97,8 +100,11 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Perform one continuous xfer2 transfer of 9840 bytes (CS held low)."""
-        return self.spi.xfer2(self._tx)
+        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) to stay under 4096 limit."""
+        r1 = self.spi.xfer2(self._tx24)
+        r2 = self.spi.xfer2(self._tx24)
+        r3 = self.spi.xfer2(self._tx12)
+        return r1 + r2 + r3
 
 
 def resync(reader: VoSPIReader, delay: float = 0.2):

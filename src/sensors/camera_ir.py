@@ -203,7 +203,14 @@ class LeptonVoSPI:
         self.spi_speed = 10_000_000   # 10 MHz
         self.spi_mode = 3             # CPOL=1, CPHA=1
         self.spi = None
-        self._tx = [0] * (self.rows_per_read * self.PACKET_BYTES)
+        if self.rows_per_read <= 24:
+            self._tx_chunks = [[0] * (self.rows_per_read * self.PACKET_BYTES)]
+        else:
+            self._tx_chunks = [
+                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
+                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
+                [0] * (12 * self.PACKET_BYTES),  # 1968 bytes
+            ]
 
     def open(self) -> None:
         if spidev is None:
@@ -225,8 +232,11 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_bytes(self) -> list[int]:
-        """Perform one continuous xfer2 transfer (CS held low)."""
-        return self.spi.xfer2(self._tx)
+        """Perform chunked xfer2 transfers (each <= 4096 bytes)."""
+        res = []
+        for tx in self._tx_chunks:
+            res.extend(self.spi.xfer2(tx))
+        return res
 
     def read_frame(self, max_retries: int = 40) -> np.ndarray:
         if np is None:

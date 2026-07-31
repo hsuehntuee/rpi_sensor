@@ -70,62 +70,40 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Canonical single-call 60-packet VoSPI reader for FLIR Lepton on RPi5.
+    """Read Lepton VoSPI frames using native spidev.xfer2().
 
-    Packs 60 spi_ioc_transfer structs into a 1920-byte buffer and issues one ioctl
-    with tx_buf=0. CS stays LOW across packets 0..58, and pulls HIGH on packet 59.
+    Chunked into 3 transfers (3936B, 3936B, 1968B) to stay under python spidev 4096 limit.
+    This native spidev implementation reliably captures full 60-packet frames.
     """
-
-    XFER_STRUCT = struct.Struct("=QQIIHBBI")
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
                  speed: int = SPI_SPEED, mode: int = SPI_MODE):
-        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
+        self.spi_bus = spi_bus
+        self.spi_device = spi_device
         self.speed = speed
         self.mode = mode
-        self.fd = -1
-        
-        # Buffer for full frame (60 x 82 uint16)
-        self._capture_buf = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-        
-        # Pre-build 60 transfer structs (1920 bytes)
-        msg_size = self.XFER_STRUCT.size
-        self._xmit_buf = np.zeros(msg_size * ROWS, dtype=np.uint8)
-        
-        for i in range(ROWS):
-            cs_change = 1 if i == (ROWS - 1) else 0
-            rx_ptr = self._capture_buf.ctypes.data + PACKET_BYTES * i
-            
-            self.XFER_STRUCT.pack_into(
-                self._xmit_buf, i * msg_size,
-                0,                                                             # tx_buf = 0 (read-only)
-                rx_ptr,                                                        # rx_buf pointer
-                PACKET_BYTES,                                                  # len (164 bytes)
-                self.speed,                                                    # speed_hz
-                0,                                                             # delay_usecs
-                8,                                                             # bits_per_word
-                cs_change,                                                     # cs_change (1 for last pkt)
-                0,                                                             # pad
-            )
-        
-        # Single struct size command (32 bytes) matching pylepton
-        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
+        self.spi = None
+        # 3 chunks of zeros: 24 pkts (3936B), 24 pkts (3936B), 12 pkts (1968B)
+        self._tx24 = [0] * (24 * PACKET_BYTES)  # 3936 bytes
+        self._tx12 = [0] * (12 * PACKET_BYTES)  # 1968 bytes
 
     def open(self):
-        self.fd = os.open(self.dev_path, os.O_RDWR)
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MODE, struct.pack("=B", self.mode))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_BITS_PER_WORD, struct.pack("=B", 8))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MAX_SPEED_HZ, struct.pack("=I", self.speed))
+        self.spi = spidev.SpiDev()
+        self.spi.open(self.spi_bus, self.spi_device)
+        self.spi.max_speed_hz = self.speed
+        self.spi.mode = self.mode
 
     def close(self):
-        if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
+        if self.spi is not None:
+            self.spi.close()
+            self.spi = None
 
-    def read_frame_raw(self) -> np.ndarray:
-        """Issue single ioctl call (60 packets in one kernel pass)."""
-        fcntl.ioctl(self.fd, self._spi_ioc_msg, self._xmit_buf)
-        return self._capture_buf.copy()
+    def read_frame_bytes(self) -> list[int]:
+        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        r1 = self.spi.xfer2(self._tx24)
+        r2 = self.spi.xfer2(self._tx24)
+        r3 = self.spi.xfer2(self._tx12)
+        return r1 + r2 + r3
 
 
 def resync(reader: VoSPIReader, delay: float = 0.2):
@@ -135,38 +113,40 @@ def resync(reader: VoSPIReader, delay: float = 0.2):
     reader.open()
 
 
-def dump_frame_headers(raw: np.ndarray, label: str = ""):
-    """Print the first few packet headers from raw uint16 buffer."""
-    print(f"  {label} Packet headers (first 10 of {raw.shape[0]}):")
+def dump_frame_headers(raw_bytes: list[int], label: str = ""):
+    """Print the first few packet headers from raw xfer2 bytes."""
+    print(f"  {label} Packet headers (first 10 of 60):")
     for i in range(min(10, ROWS)):
-        w0 = int(raw[i, 0])
-        header_flags = w0 & 0xFF
-        pkt_num = (w0 >> 8) & 0xFF
-        is_discard = (header_flags & 0x0F) == 0x0F
-        print(f"    Pkt {i:02d}: Flags=0x{header_flags:02X}  "
+        offset = i * PACKET_BYTES
+        b0 = raw_bytes[offset]
+        b1 = raw_bytes[offset + 1]
+        is_discard = (b0 & 0x0F) == 0x0F
+        pkt_num = b1
+        print(f"    Pkt {i:02d}: Flags=0x{b0:02X}  "
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame with packet slot accumulation."""
+    """Try to capture a valid 80x60 Lepton 2.x frame."""
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
 
     for attempt in range(max_attempts):
-        raw = reader.read_frame_raw()
+        raw_bytes = reader.read_frame_bytes()
         
         for row in range(ROWS):
-            w0 = int(raw[row, 0])
-            header_flags = w0 & 0xFF
-            pkt_num = (w0 >> 8) & 0xFF
+            offset = row * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
             
             # Discard packet?
-            if (header_flags & 0x0F) == 0x0F:
+            if (b0 & 0x0F) == 0x0F:
                 discard_streak += 1
                 continue
             
             discard_streak = 0
+            pkt_num = b1
             
             if pkt_num < ROWS:
                 if pkt_num == 0 and collected < ROWS:
@@ -174,7 +154,9 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected = 0
                 
                 if packets[pkt_num] is None:
-                    packets[pkt_num] = raw[row, 2:PACKET_WORDS].byteswap()
+                    # Extract 160 payload bytes -> 80 big-endian uint16 values
+                    payload_bytes = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                     collected += 1
                     
                     if collected == ROWS:
@@ -182,6 +164,7 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                         frame = np.array(packets, dtype=np.uint16)
                         return frame
 
+        # Only trigger CS-high resync if we see continuous discards for over 500 packets
         if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing...")
             resync(reader, 0.25)
@@ -264,8 +247,8 @@ def main() -> None:
     resync(reader, 0.2)
 
     # Read one frame and show headers
-    raw = reader.read_frame_raw()
-    dump_frame_headers(raw, "[Diag]")
+    raw_bytes = reader.read_frame_bytes()
+    dump_frame_headers(raw_bytes, "[Diag]")
 
     # ── Step 3: Attempt to capture valid frame ──
     print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 5 seconds)...")
@@ -290,7 +273,7 @@ def main() -> None:
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     
-    # ── Human Face Thermal Enhancer (Percentile Clipping) ──
+    # ── Human Face Thermal Enhancer (5th-95th Percentile Clipping) ──
     # Ignore background cold walls and hot spots, focus dynamic range on human skin
     p_min = np.percentile(frame, 5)
     p_max = np.percentile(frame, 95)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -177,7 +178,33 @@ except ImportError:
 
 
 class LeptonVoSPI:
-    """16-bit VoSPI frame accumulator for FLIR Lepton 2.x and 3.x."""
+    """16-bit VoSPI frame accumulator for FLIR Lepton 2.x and 3.x.
+
+    Uses raw ioctl SPI_IOC_MESSAGE to read entire frames in a single
+    kernel call, keeping CS asserted across all packets.  This avoids
+    the per-packet CS toggle that causes permanent desynchronisation
+    on Raspberry Pi 5 / RP1.
+    """
+
+    PACKET_WORDS = 82          # 80 pixels + 2 header words
+    PACKET_BYTES = 164         # 82 * 2
+
+    # struct spi_ioc_transfer (must match kernel layout)
+    _XFER = struct.Struct("=QQIIHBBI")
+
+    # ioctl helpers
+    @staticmethod
+    def _ioc(direction, itype, nr, size):
+        return (direction << 30) | (itype << 8) | nr | (size << 16)
+
+    @staticmethod
+    def _iow(itype, nr, fmt):
+        return LeptonVoSPI._ioc(1, itype, nr, struct.calcsize(fmt))
+
+    _SPI_IOC_MAGIC = ord("k")
+    _SPI_IOC_WR_MODE          = None  # computed in __init__
+    _SPI_IOC_WR_BITS_PER_WORD = None
+    _SPI_IOC_WR_MAX_SPEED_HZ  = None
 
     def __init__(
         self,
@@ -186,124 +213,162 @@ class LeptonVoSPI:
         width: int = 80,
         height: int = 60,
     ) -> None:
-        self.spi_bus = spi_bus
-        self.spi_device = spi_device
+        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
         self.width = width
         self.height = height
-        self.spi = None
-        self.is_lepton3 = (self.width * self.height) > 4800
-        self.packet_size = 164
+        self.rows_per_read = height if width <= 80 else 60
+        self.fd = -1
+        self.is_lepton3 = (width * height) > 4800
+        self.spi_speed = 10_000_000   # 10 MHz
+        self.spi_mode = 3             # CPOL=1, CPHA=1
+
+        # Compute ioctl constants
+        M = self._SPI_IOC_MAGIC
+        self._WR_MODE  = self._iow(M, 1, "=B")
+        self._WR_BPW   = self._iow(M, 3, "=B")
+        self._WR_SPEED = self._iow(M, 4, "=I")
+        self._IOC_MSG  = self._iow(M, 0, self._XFER.format)
+
+        # Pre-allocate buffers
+        self._tx = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
+        self._rx = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
+        # Build multi-message ioctl buffer
+        msg_sz = self._XFER.size
+        self._msg_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
+        for i in range(self.rows_per_read):
+            self._XFER.pack_into(
+                self._msg_buf, i * msg_sz,
+                self._tx.ctypes.data,
+                self._rx.ctypes.data + self.PACKET_BYTES * i,
+                self.PACKET_BYTES,
+                self.spi_speed,
+                0,   # delay_usecs
+                8,   # bits_per_word
+                0,   # cs_change
+                0,   # pad
+            )
 
     def open(self) -> None:
-        if spidev is None:
-            raise ImportError("spidev module is not available on this platform")
-        self.spi = spidev.SpiDev()
-        self.spi.open(self.spi_bus, self.spi_device)
-        self.spi.max_speed_hz = 8000000
-        self.spi.mode = 3
+        import os as _os, fcntl as _fcntl
+        self.fd = _os.open(self.dev_path, _os.O_RDWR)
+        _fcntl.ioctl(self.fd, self._WR_MODE,  struct.pack("=B", self.spi_mode))
+        _fcntl.ioctl(self.fd, self._WR_BPW,   struct.pack("=B", 8))
+        _fcntl.ioctl(self.fd, self._WR_SPEED,  struct.pack("=I", self.spi_speed))
 
     def close(self) -> None:
-        if self.spi is not None:
-            self.spi.close()
-            self.spi = None
+        if self.fd >= 0:
+            import os as _os
+            _os.close(self.fd)
+            self.fd = -1
 
-    def read_frame(self, max_retries: int = 5000) -> np.ndarray:
+    def _resync(self, delay: float = 0.2) -> None:
+        """VoSPI resync: CS high for ≥185 ms."""
+        self.close()
+        time.sleep(delay)
+        self.open()
+
+    def _read_frame_raw(self) -> np.ndarray:
+        """One ioctl that reads rows_per_read packets with CS held low."""
+        import fcntl as _fcntl
+        _fcntl.ioctl(self.fd, self._IOC_MSG, self._msg_buf)
+        return self._rx
+
+    def read_frame(self, max_retries: int = 40) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
-        if self.spi is None:
+        if self.fd < 0:
             self.open()
 
         raw_frame = np.zeros((self.height, self.width), dtype=np.uint16)
 
         if not self.is_lepton3:
-            packets = [None] * 60
-            discard_count = 0
-            retries = 0
+            # ── Lepton 2.x: 60 packets per frame ──
+            for attempt in range(max_retries):
+                raw = self._read_frame_raw()
 
-            while retries < max_retries:
-                packet = self.spi.readbytes(self.packet_size)
-                if (packet[0] & 0x0F) == 0x0F:
-                    discard_count += 1
-                    if discard_count > 1000:
-                        self.close()
-                        self.open()
-                        discard_count = 0
+                # Check first packet header
+                w0 = int(raw[0, 0])
+                b0 = (w0 >> 8) & 0xFF
+                b1 = w0 & 0xFF
+
+                # Discard frame?
+                if (b0 & 0x0F) == 0x0F:
+                    self._resync(0.2)
                     continue
 
-                discard_count = 0
-                packet_num = packet[1]
-
-                if packet_num >= 60:
+                # Must start at packet 0
+                if b1 != 0:
+                    self._resync(0.2)
                     continue
 
-                if packet_num == 0:
-                    packets = [None] * 60
+                # Validate full sequence 0..59
+                valid = True
+                for row in range(60):
+                    w = int(raw[row, 0])
+                    hb = (w >> 8) & 0xFF
+                    lb = w & 0xFF
+                    if (hb & 0x0F) == 0x0F or lb != row:
+                        valid = False
+                        break
 
-                packets[packet_num] = packet[4:]
-
-                if packet_num == 59 and all(p is not None for p in packets):
-                    for i, p_data in enumerate(packets):
-                        raw_frame[i, :] = np.frombuffer(bytes(p_data), dtype=">u2")
+                if valid:
+                    raw_frame[:, :] = raw[:, 2:2 + self.width]
                     return raw_frame
 
-                retries += 1
+                self._resync(0.2)
+
             raise RuntimeError("Timed out waiting for Lepton 2.x frame")
 
         else:
-            segments = {1: [None] * 60, 2: [None] * 60, 3: [None] * 60, 4: [None] * 60}
-            current_segment = 1
-            discard_count = 0
-            retries = 0
-
-            while retries < max_retries:
-                packet = self.spi.readbytes(self.packet_size)
-                if (packet[0] & 0x0F) == 0x0F:
-                    discard_count += 1
-                    if discard_count > 1000:
-                        self.close()
-                        self.open()
-                        discard_count = 0
-                        current_segment = 1
+            # ── Lepton 3.x: 4 segments × 60 packets ──
+            segments_data = {}
+            for attempt in range(max_retries * 4):
+                raw = self._read_frame_raw()
+                w0 = int(raw[0, 0])
+                b0 = (w0 >> 8) & 0xFF
+                if (b0 & 0x0F) == 0x0F:
+                    self._resync(0.2)
+                    segments_data.clear()
                     continue
 
-                discard_count = 0
-                packet_num = packet[1]
-
-                if packet_num >= 60:
+                # Read segment id from packet 20
+                w20 = int(raw[20, 0])
+                seg_id = ((w20 >> 8) >> 4) & 0x07
+                if seg_id < 1 or seg_id > 4:
+                    self._resync(0.2)
+                    segments_data.clear()
                     continue
 
-                if packet_num == 20:
-                    seg_id = (packet[0] >> 4) & 0x07
-                    if seg_id < 1 or seg_id > 4:
-                        current_segment = 1
-                        continue
-                    if seg_id != current_segment:
-                        current_segment = 1
-                        if seg_id != 1:
-                            continue
+                # Validate packet sequence
+                valid = True
+                for row in range(60):
+                    w = int(raw[row, 0])
+                    hb = (w >> 8) & 0xFF
+                    lb = w & 0xFF
+                    if (hb & 0x0F) == 0x0F or lb != row:
+                        valid = False
+                        break
 
-                segments[current_segment][packet_num] = packet[4:]
+                if not valid:
+                    self._resync(0.2)
+                    segments_data.clear()
+                    continue
 
-                if packet_num == 59:
-                    if all(p is not None for p in segments[current_segment]):
-                        if current_segment == 4:
-                            for seg in range(1, 5):
-                                seg_packets = segments[seg]
-                                for p_idx, p_data in enumerate(seg_packets):
-                                    row = (seg - 1) * 30 + (p_idx // 2)
-                                    col_offset = 80 if (p_idx % 2 == 1) else 0
-                                    raw_frame[row, col_offset:col_offset + 80] = np.frombuffer(
-                                        bytes(p_data), dtype=">u2"
-                                    )
-                            return raw_frame
-                        else:
-                            current_segment += 1
-                    else:
-                        current_segment = 1
-                        segments = {1: [None] * 60, 2: [None] * 60, 3: [None] * 60, 4: [None] * 60}
+                segments_data[seg_id] = raw[:, 2:2 + self.width].copy()
 
-                retries += 1
+                if len(segments_data) == 4:
+                    for seg in range(1, 5):
+                        base_row = (seg - 1) * 30
+                        seg_pixels = segments_data[seg]
+                        for p_idx in range(60):
+                            row = base_row + (p_idx // 2)
+                            col_off = 80 if (p_idx % 2 == 1) else 0
+                            raw_frame[row, col_off:col_off + 80] = seg_pixels[p_idx, :]
+                    return raw_frame
+
             raise RuntimeError("Timed out waiting for Lepton 3.x frame segments")
+
+
 
 
 class PiIRCamera(RGBCamera):

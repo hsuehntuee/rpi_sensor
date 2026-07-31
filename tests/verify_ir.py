@@ -123,15 +123,21 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean, un-fragmented thermal frame by sliding through a 180-packet buffer."""
+    """Capture a 100% clean, un-fragmented thermal frame by sliding through a large SPI buffer."""
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
+        n_bytes = len(raw_bytes)
+        n_packets = n_bytes // PACKET_BYTES
+        
+        if attempt == 0:
+            print(f"  [Diag] SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
         
         packets = [None] * ROWS
         collected = 0
         discard_count = 0
         
-        for i in range(ROWS * 3):
+        # Safely loop through available packets
+        for i in range(n_packets):
             offset = i * PACKET_BYTES
             b0 = raw_bytes[offset]
             b1 = raw_bytes[offset + 1]
@@ -160,7 +166,7 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                         return np.array(packets, dtype=np.uint16)
 
         # Trigger CS-high resync if the buffer is nearly all discard packets
-        if discard_count >= (ROWS * 3) - 10:
+        if n_packets > 0 and discard_count >= n_packets - 10:
             print(f"    Attempt {attempt+1}: All discards, resyncing for 500ms...")
             resync(reader, 0.5)
 

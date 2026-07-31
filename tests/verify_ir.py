@@ -50,7 +50,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 10_000_000         # 10 MHz (conservative for RPi5)
+SPI_SPEED    = 20_000_000         # 20 MHz (Official FLIR Lepton VoSPI speed)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 
@@ -127,7 +127,7 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | None:
+def try_capture(reader: VoSPIReader, max_attempts: int = 150) -> np.ndarray | None:
     """Try to capture a valid 80x60 Lepton 2.x frame."""
     packets = [None] * ROWS
     collected = 0
@@ -165,9 +165,10 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | Non
                         frame = np.array(packets, dtype=np.uint16)
                         return frame
 
-        if discard_streak > 120:
+        # Only trigger CS-high resync if we see continuous discards for over 500 packets (8+ full reads)
+        if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing...")
-            resync(reader, 0.2)
+            resync(reader, 0.25)
             discard_streak = 0
 
     return None

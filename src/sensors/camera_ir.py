@@ -200,7 +200,7 @@ class LeptonVoSPI:
         self.height = height
         self.rows_per_read = height if width <= 80 else 60
         self.is_lepton3 = (width * height) > 4800
-        self.spi_speed = 10_000_000   # 10 MHz
+        self.spi_speed = 20_000_000   # 20 MHz (Official FLIR Lepton speed)
         self.spi_mode = 3             # CPOL=1, CPHA=1
         self.spi = None
         if self.rows_per_read <= 24:
@@ -238,7 +238,7 @@ class LeptonVoSPI:
             res.extend(self.spi.xfer2(tx))
         return res
 
-    def read_frame(self, max_retries: int = 40) -> np.ndarray:
+    def read_frame(self, max_retries: int = 150) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
         if self.spi is None:
@@ -281,8 +281,8 @@ class LeptonVoSPI:
                                     raw_frame[r, :] = packets[r]
                                 return raw_frame
 
-                if discard_streak > 120:
-                    self._resync(0.2)
+                if discard_streak > 500:
+                    self._resync(0.25)
                     discard_streak = 0
 
             raise RuntimeError("Timed out waiting for Lepton 2.x frame")

@@ -127,22 +127,24 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame."""
+    """Try to capture a valid 80x60 Lepton 2.x frame with dynamic header offset alignment."""
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
 
     for attempt in range(max_attempts):
         raw_bytes = reader.read_frame_bytes()
+        n_bytes = len(raw_bytes)
+        idx = 0
         
-        for row in range(ROWS):
-            offset = row * PACKET_BYTES
-            b0 = raw_bytes[offset]
-            b1 = raw_bytes[offset + 1]
+        while idx <= n_bytes - PACKET_BYTES:
+            b0 = raw_bytes[idx]
+            b1 = raw_bytes[idx + 1]
             
             # Discard packet?
             if (b0 & 0x0F) == 0x0F:
                 discard_streak += 1
+                idx += 1
                 continue
             
             discard_streak = 0
@@ -154,15 +156,19 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     collected = 0
                 
                 if packets[pkt_num] is None:
-                    # Extract 160 payload bytes -> 80 big-endian uint16 values
-                    payload_bytes = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    # Extract 160 payload bytes from exact header offset `idx`
+                    payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
                     packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                     collected += 1
                     
                     if collected == ROWS:
-                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
-                        frame = np.array(packets, dtype=np.uint16)
-                        return frame
+                        print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected with dynamic header alignment!")
+                        return np.array(packets, dtype=np.uint16)
+                
+                # Advance forward by 164 bytes for next packet
+                idx += PACKET_BYTES
+            else:
+                idx += 1
 
         # Trigger CS-high resync if we see continuous discards for over 500 packets
         if discard_streak > 500:

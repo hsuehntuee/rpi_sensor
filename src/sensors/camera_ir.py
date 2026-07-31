@@ -251,13 +251,16 @@ class LeptonVoSPI:
 
             for attempt in range(max_retries):
                 raw_bytes = self._read_frame_bytes()
-                for row in range(self.rows_per_read):
-                    offset = row * self.PACKET_BYTES
-                    b0 = raw_bytes[offset]
-                    b1 = raw_bytes[offset + 1]
+                n_bytes = len(raw_bytes)
+                idx = 0
+
+                while idx <= n_bytes - self.PACKET_BYTES:
+                    b0 = raw_bytes[idx]
+                    b1 = raw_bytes[idx + 1]
 
                     if (b0 & 0x0F) == 0x0F:
                         discard_streak += 1
+                        idx += 1
                         continue
 
                     discard_streak = 0
@@ -269,7 +272,7 @@ class LeptonVoSPI:
                             collected = 0
 
                         if packets[pkt_num] is None:
-                            payload_bytes = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
+                            payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
                             packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                             collected += 1
 
@@ -277,6 +280,10 @@ class LeptonVoSPI:
                                 for r in range(self.height):
                                     raw_frame[r, :] = packets[r]
                                 return raw_frame
+
+                        idx += self.PACKET_BYTES
+                    else:
+                        idx += 1
 
                 if discard_streak > 500:
                     self._resync(0.5)

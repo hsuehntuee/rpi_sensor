@@ -236,6 +236,7 @@ class LeptonVoSPI:
         msg_sz = self._XFER.size
         self._msg_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
         for i in range(self.rows_per_read):
+            cs_change = 1 if i == (self.rows_per_read - 1) else 0
             self._XFER.pack_into(
                 self._msg_buf, i * msg_sz,
                 self._tx.ctypes.data,
@@ -244,7 +245,7 @@ class LeptonVoSPI:
                 self.spi_speed,
                 0,   # delay_usecs
                 8,   # bits_per_word
-                0,   # cs_change
+                cs_change,   # cs_change (1 for last packet)
                 0,   # pad
             )
 

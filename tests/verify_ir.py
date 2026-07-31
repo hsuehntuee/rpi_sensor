@@ -101,6 +101,7 @@ class VoSPIReader:
         msg_size = self.XFER_STRUCT.size
         self._msg_buf = np.zeros(msg_size * ROWS, dtype=np.uint8)
         for i in range(ROWS):
+            cs_change = 1 if i == (ROWS - 1) else 0
             self.XFER_STRUCT.pack_into(
                 self._msg_buf, i * msg_size,
                 self._tx.ctypes.data,                                  # tx_buf
@@ -109,7 +110,7 @@ class VoSPIReader:
                 self.speed,                                            # speed_hz
                 0,                                                     # delay_usecs
                 8,                                                     # bits_per_word
-                0,                                                     # cs_change
+                cs_change,                                             # cs_change (1 for last packet)
                 0,                                                     # pad
             )
         # ioctl request code for SPI_IOC_MESSAGE(ROWS)

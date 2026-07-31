@@ -69,84 +69,35 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Read Lepton VoSPI frames using raw ioctl (no spidev Python module).
+    """Read Lepton VoSPI frames using native spidev.xfer2().
 
-    This mirrors the approach used by pylepton: open /dev/spidevX.Y directly,
-    configure SPI via ioctl, and issue a multi-message SPI_IOC_MESSAGE ioctl
-    that keeps CS asserted across the entire frame.
+    spi.xfer2([0]*9840) performs a single continuous SPI transfer in C,
+    keeping CS low across all 60 packets and pulling CS high at the end.
     """
-
-    # struct spi_ioc_transfer layout (matches kernel, 64-bit aligned)
-    #   __u64  tx_buf
-    #   __u64  rx_buf
-    #   __u32  len
-    #   __u32  speed_hz
-    #   __u16  delay_usecs
-    #   __u8   bits_per_word
-    #   __u8   cs_change
-    #   __u32  pad
-    XFER_STRUCT = struct.Struct("=QQIIHBBI")
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
                  speed: int = SPI_SPEED, mode: int = SPI_MODE):
-        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
+        self.spi_bus = spi_bus
+        self.spi_device = spi_device
         self.speed = speed
         self.mode = mode
-        self.fd = -1
-        # RX buffer for one full frame (60 x 82 uint16)
-        self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
-        
-        # 60 packets chunked into 3 ioctl calls: 24 pkts, 24 pkts, 12 pkts
-        # Total bytes per ioctl: 3936, 3936, 1968 (all <= 4096 bufsiz kernel limit)
-        self.chunks = [(0, 24), (24, 24), (48, 12)]
-        msg_size = self.XFER_STRUCT.size
-        
-        self._msg_bufs = []
-        self._ioc_cmds = []
-        
-        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
-            buf_bytes = msg_size * num_pkts
-            buf = np.zeros(buf_bytes, dtype=np.uint8)
-            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
-            
-            for i in range(num_pkts):
-                global_pkt = start_pkt + i
-                is_last_pkt_overall = is_last_chunk and (i == num_pkts - 1)
-                cs_change = 1 if is_last_pkt_overall else 0
-                rx_ptr = self._rx.ctypes.data + PACKET_BYTES * global_pkt
-                
-                self.XFER_STRUCT.pack_into(
-                    buf, i * msg_size,
-                    0,                                                 # tx_buf = 0 (read-only)
-                    rx_ptr,                                            # rx_buf
-                    PACKET_BYTES,                                      # len = 164 bytes
-                    self.speed,                                        # speed_hz
-                    0,                                                 # delay_usecs
-                    8,                                                 # bits_per_word
-                    cs_change,                                         # cs_change
-                    0,                                                 # pad
-                )
-            
-            self._msg_bufs.append(buf)
-            cmd = _IOC(1, SPI_IOC_MAGIC, 0, buf_bytes)
-            self._ioc_cmds.append(cmd)
+        self.spi = None
+        self._tx = [0] * (ROWS * PACKET_BYTES)  # 9840 zeros
 
     def open(self):
-        self.fd = os.open(self.dev_path, os.O_RDWR)
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MODE, struct.pack("=B", self.mode))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_BITS_PER_WORD, struct.pack("=B", 8))
-        fcntl.ioctl(self.fd, SPI_IOC_WR_MAX_SPEED_HZ, struct.pack("=I", self.speed))
+        self.spi = spidev.SpiDev()
+        self.spi.open(self.spi_bus, self.spi_device)
+        self.spi.max_speed_hz = self.speed
+        self.spi.mode = self.mode
 
     def close(self):
-        if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
+        if self.spi is not None:
+            self.spi.close()
+            self.spi = None
 
-    def read_frame_raw(self) -> np.ndarray:
-        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all 60 pkts."""
-        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
-            fcntl.ioctl(self.fd, cmd, buf)
-        return self._rx.copy()
+    def read_frame_bytes(self) -> list[int]:
+        """Perform one continuous xfer2 transfer of 9840 bytes (CS held low)."""
+        return self.spi.xfer2(self._tx)
 
 
 def resync(reader: VoSPIReader, delay: float = 0.2):
@@ -156,15 +107,16 @@ def resync(reader: VoSPIReader, delay: float = 0.2):
     reader.open()
 
 
-def dump_frame_headers(raw: np.ndarray, label: str = ""):
-    """Print the first few packet headers from a raw frame read."""
-    print(f"  {label} Packet headers (first 10 of {raw.shape[0]}):")
-    for i in range(min(10, raw.shape[0])):
-        w0 = int(raw[i, 0])
-        header_flags = w0 & 0xFF
-        pkt_num = (w0 >> 8) & 0xFF
-        is_discard = (header_flags & 0x0F) == 0x0F
-        print(f"    Pkt {i:02d}: Flags=0x{header_flags:02X}  "
+def dump_frame_headers(raw_bytes: list[int], label: str = ""):
+    """Print the first few packet headers from raw xfer2 bytes."""
+    print(f"  {label} Packet headers (first 10 of 60):")
+    for i in range(min(10, ROWS)):
+        offset = i * PACKET_BYTES
+        b0 = raw_bytes[offset]
+        b1 = raw_bytes[offset + 1]
+        is_discard = (b0 & 0x0F) == 0x0F
+        pkt_num = b1
+        print(f"    Pkt {i:02d}: Flags=0x{b0:02X}  "
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
@@ -175,30 +127,30 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | Non
     discard_streak = 0
 
     for attempt in range(max_attempts):
-        raw = reader.read_frame_raw()
+        raw_bytes = reader.read_frame_bytes()
         
         for row in range(ROWS):
-            w0 = int(raw[row, 0])
-            header_flags = w0 & 0xFF
-            pkt_num = (w0 >> 8) & 0xFF
+            offset = row * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
             
             # Discard packet?
-            if (header_flags & 0x0F) == 0x0F:
+            if (b0 & 0x0F) == 0x0F:
                 discard_streak += 1
                 continue
             
             discard_streak = 0
+            pkt_num = b1
             
             if pkt_num < ROWS:
                 if pkt_num == 0 and collected < ROWS:
-                    # New frame sequence starting
                     packets = [None] * ROWS
                     collected = 0
                 
                 if packets[pkt_num] is None:
-                    # Store payload word array (byteswap big-endian uint16 from Lepton)
-                    payload = raw[row, 2:PACKET_WORDS].byteswap()
-                    packets[pkt_num] = payload
+                    # Extract 160 payload bytes -> 80 big-endian uint16 values
+                    payload_bytes = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                     collected += 1
                     
                     if collected == ROWS:
@@ -245,11 +197,11 @@ def main() -> None:
         print("  ERROR: Cannot reach Lepton over I2C. Check SDA/SCL wiring.")
 
     # ── Step 2: Raw SPI frame read ──
-    print("\n[2/3] Raw SPI frame read (ioctl, CS held low across 60 packets)...")
+    print("\n[2/3] Raw SPI frame read (spidev.xfer2, CS held low across 60 packets)...")
     reader = VoSPIReader(spi_bus=0, spi_device=0, speed=SPI_SPEED, mode=SPI_MODE)
     try:
         reader.open()
-        print(f"  Opened {reader.dev_path} (Mode={SPI_MODE}, Speed={SPI_SPEED/1e6:.0f}MHz)")
+        print(f"  Opened /dev/spidev0.0 (Mode={SPI_MODE}, Speed={SPI_SPEED/1e6:.0f}MHz)")
     except Exception as exc:
         print(f"  ERROR opening SPI device: {exc}")
         print("  Check: dtparam=spi=on in /boot/firmware/config.txt and reboot.")
@@ -260,8 +212,8 @@ def main() -> None:
     resync(reader, 0.2)
 
     # Read one frame and show headers
-    raw = reader.read_frame_raw()
-    dump_frame_headers(raw, "[Diag]")
+    raw_bytes = reader.read_frame_bytes()
+    dump_frame_headers(raw_bytes, "[Diag]")
 
     # ── Step 3: Attempt to capture valid frame ──
     print("\n[3/3] Attempting to capture a valid thermal frame...")

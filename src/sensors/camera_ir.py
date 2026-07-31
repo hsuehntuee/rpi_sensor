@@ -234,7 +234,7 @@ class LeptonVoSPI:
             cs_change = 1 if i == (self.rows_per_read - 1) else 0
             self.XFER_STRUCT.pack_into(
                 self._xmit_buf, i * msg_sz,
-                self._txbuf.ctypes.data,                                         # tx_buf
+                0,                                                               # tx_buf = 0 (read-only)
                 self._capture_buf.ctypes.data + self.PACKET_BYTES * i,            # rx_buf
                 self.PACKET_BYTES,                                               # len (164 bytes)
                 self.spi_speed,                                                  # speed_hz

@@ -98,7 +98,7 @@ class VoSPIReader:
             cs_change = 1 if i == (ROWS - 1) else 0
             self.XFER_STRUCT.pack_into(
                 self._xmit_buf, i * msg_size,
-                self._txbuf.ctypes.data,                                       # tx_buf
+                0,                                                             # tx_buf = 0 (read-only)
                 self._capture_buf.ctypes.data + PACKET_BYTES * i,               # rx_buf
                 PACKET_BYTES,                                                  # len (164 bytes)
                 self.speed,                                                    # speed_hz

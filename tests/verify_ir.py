@@ -248,6 +248,26 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
     return lut[scaled_uint8]
 
 
+def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool:
+    """Send SYS software reboot command (0x0242) over CCI I2C to force BootOK=True."""
+    try:
+        with SMBus(bus_number) as bus:
+            # Set Data Length to 0 (Register 0x0006)
+            data_len_req = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
+            bus.i2c_rdwr(data_len_req)
+            time.sleep(0.01)
+            
+            # Write 0x0242 (SYS Run Boot) to Command Register (Register 0x0004)
+            cmd_req = i2c_msg.write(address, [0x00, 0x04, 0x02, 0x42])
+            bus.i2c_rdwr(cmd_req)
+            time.sleep(0.5)
+            print("  [CCI] Issued Lepton SYS software reboot command (0x0242)...")
+            return True
+    except Exception as exc:
+        print(f"  [CCI] Reboot command note: {exc}")
+        return False
+
+
 def main() -> None:
     print("=" * 60)
     print("      FLIR Lepton IR Camera Test Script (spidev mode)")
@@ -265,7 +285,7 @@ def main() -> None:
     except Exception:
         print("Info: Using default 80x60")
 
-    # ── Step 1: I2C probe & BootOK wait loop ──
+    # ── Step 1: I2C probe & BootOK wait/reboot loop ──
     print("\n[1/3] Probing Lepton CCI (I2C bus 1, address 0x2A)...")
     status_reg = read_raw_status(bus_number=1, address=0x2A)
     if status_reg is not None:
@@ -274,7 +294,9 @@ def main() -> None:
         print(f"  Status Register: 0x{status_reg:04X}  "
               f"(Busy={busy}, BootOK={boot_ok})")
         if not boot_ok or busy:
-            print("  Info: Lepton core is booting/calibrating. Waiting up to 3 seconds for BootOK...")
+            print("  Info: Lepton core is BootOK=False. Issuing CCI software reboot...")
+            send_lepton_reboot_command(bus_number=1, address=0x2A)
+            
             for _ in range(15):
                 time.sleep(0.2)
                 status_reg = read_raw_status(bus_number=1, address=0x2A)

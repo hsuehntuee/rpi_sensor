@@ -116,27 +116,34 @@ class LeptonCCI:
         fallback_width: int | None = None,
         fallback_height: int | None = None,
     ) -> LeptonModel:
-        part_number = self.read_part_number()
-        matched = next(
-            (
-                (known, details)
-                for known, details in _KNOWN_MODELS.items()
-                if part_number.startswith(known)
-            ),
-            None,
-        )
-        if matched is None:
+        try:
+            part_number = self.read_part_number()
+            matched = next(
+                (
+                    (known, details)
+                    for known, details in _KNOWN_MODELS.items()
+                    if part_number.startswith(known)
+                ),
+                None,
+            )
+            if matched is None:
+                if fallback_width is not None and fallback_height is not None:
+                    return LeptonModel(
+                        part_number, "Unknown Lepton (manual dimensions)", fallback_width,
+                        fallback_height
+                    )
+                raise LeptonDetectionError(
+                    f"unsupported Lepton part number: {part_number}; "
+                    "set LEPTON_WIDTH and LEPTON_HEIGHT explicitly"
+                )
+            _, (family, width, height) = matched
+            return LeptonModel(part_number, family, width, height)
+        except Exception as exc:
             if fallback_width is not None and fallback_height is not None:
                 return LeptonModel(
-                    part_number, "Unknown Lepton (manual dimensions)", fallback_width,
-                    fallback_height
+                    "UNKNOWN", "Unknown Lepton (fallback)", fallback_width, fallback_height
                 )
-            raise LeptonDetectionError(
-                f"unsupported Lepton part number: {part_number}; "
-                "set LEPTON_WIDTH and LEPTON_HEIGHT explicitly"
-            )
-        _, (family, width, height) = matched
-        return LeptonModel(part_number, family, width, height)
+            raise LeptonDetectionError("Lepton CCI probe failed and no fallback dimensions set") from exc
 
 
 def probe_lepton(

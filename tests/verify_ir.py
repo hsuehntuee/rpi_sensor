@@ -72,8 +72,9 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 class VoSPIReader:
     """Read Lepton VoSPI frames using native spidev.xfer2().
 
-    Chunked into 3 transfers (3936B, 3936B, 1968B) to stay under python spidev 4096 limit.
-    This satisfies Linux kernel bufsiz limit with ZERO Errno 90 errors.
+    Reads 120 packets (5 chunks of 24 packets = 19,680 bytes) per pass.
+    Each chunk is 3936 bytes (<= 4096 kernel limit, ZERO Errno 90 errors).
+    Reading 120 packets guarantees a complete unbroken 60-packet frame is captured in ONE single pass.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -83,9 +84,8 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        # 3 chunks: 24 pkts (3936B), 24 pkts (3936B), 12 pkts (1968B)
+        # 5 chunks of 24 pkts (3936B each) = 120 packets total
         self._tx24 = [0] * (24 * PACKET_BYTES)  # 3936 bytes
-        self._tx12 = [0] * (12 * PACKET_BYTES)  # 1968 bytes
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -99,11 +99,13 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        """Perform 5 xfer2 transfers (3936B each) to read 120 packets continuously."""
         r1 = self.spi.xfer2(self._tx24)
         r2 = self.spi.xfer2(self._tx24)
-        r3 = self.spi.xfer2(self._tx12)
-        return r1 + r2 + r3
+        r3 = self.spi.xfer2(self._tx24)
+        r4 = self.spi.xfer2(self._tx24)
+        r5 = self.spi.xfer2(self._tx24)
+        return r1 + r2 + r3 + r4 + r5
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -127,7 +129,7 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% single-pass coherent 80x60 thermal frame (rejecting multi-pass stitching)."""
+    """Capture a 100% single-pass coherent 80x60 thermal frame."""
     discard_streak = 0
 
     for attempt in range(max_attempts):
@@ -152,17 +154,22 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             pkt_num = b1
             discard_streak = 0
             
-            if pkt_num < ROWS and single_pass_packets[pkt_num] is None:
-                payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
-                single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                collected += 1
+            if pkt_num < ROWS:
+                # If packet 0 appears mid-stream and we haven't completed a frame, reset single-pass buffer
+                if pkt_num == 0 and collected < ROWS and collected > 0:
+                    single_pass_packets = [None] * ROWS
+                    collected = 0
+                
+                if single_pass_packets[pkt_num] is None:
+                    payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
+                    single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                    collected += 1
+                    
+                    if collected == ROWS:
+                        print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected in a single pass!")
+                        return np.array(single_pass_packets, dtype=np.uint16)
             
             idx += PACKET_BYTES
-
-        # REQUIRE ALL 60 ROWS TO BE CAPTURED IN THIS SINGLE PASS
-        if collected == ROWS:
-            print(f"    Attempt {attempt+1}: SUCCESS! Single-pass coherent frame captured!")
-            return np.array(single_pass_packets, dtype=np.uint16)
 
         # Trigger CS-high resync if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:

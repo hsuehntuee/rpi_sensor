@@ -203,11 +203,8 @@ class LeptonVoSPI:
         if self.rows_per_read <= 24:
             self._tx_chunks = [[0] * (self.rows_per_read * self.PACKET_BYTES)]
         else:
-            self._tx_chunks = [
-                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
-                [0] * (24 * self.PACKET_BYTES),  # 3936 bytes
-                [0] * (12 * self.PACKET_BYTES),  # 1968 bytes
-            ]
+            # 5 chunks of 24 pkts (3936B each) = 120 packets total
+            self._tx_chunks = [[0] * (24 * self.PACKET_BYTES)] * 5
 
     def open(self) -> None:
         if spidev is None:
@@ -245,8 +242,6 @@ class LeptonVoSPI:
 
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
-            packets = [None] * self.height
-            collected = 0
             discard_streak = 0
 
             for attempt in range(max_retries):
@@ -270,17 +265,22 @@ class LeptonVoSPI:
                     pkt_num = b1
                     discard_streak = 0
 
-                    if pkt_num < self.height and single_pass_packets[pkt_num] is None:
-                        payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
-                        single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
-                        collected += 1
+                    if pkt_num < self.height:
+                        if pkt_num == 0 and collected < self.height and collected > 0:
+                            single_pass_packets = [None] * self.height
+                            collected = 0
+
+                        if single_pass_packets[pkt_num] is None:
+                            payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
+                            single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                            collected += 1
+
+                            if collected == self.height:
+                                for r in range(self.height):
+                                    raw_frame[r, :] = single_pass_packets[r]
+                                return raw_frame
 
                     idx += self.PACKET_BYTES
-
-                if collected == self.height:
-                    for r in range(self.height):
-                        raw_frame[r, :] = single_pass_packets[r]
-                    return raw_frame
 
                 if discard_streak > 500:
                     self._resync(0.5)

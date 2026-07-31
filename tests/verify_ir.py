@@ -30,31 +30,29 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
         return None
 
 def debug_spi(spi_bus: int = 0, spi_device: int = 0) -> None:
-    print(f"\n[Diag] Starting raw SPI debug on /dev/spidev{spi_bus}.{spi_device}...")
-    try:
-        spi = spidev.SpiDev()
-        spi.open(spi_bus, spi_device)
-        spi.max_speed_hz = 8000000
-        spi.mode = 3
-        
-        samples = []
-        for _ in range(20):
-            packet = spi.readbytes(164)
-            samples.append(packet[:4])
-        spi.close()
-        
-        print("  [Diag] First 4 bytes of 20 consecutive SPI packets:")
-        for idx, s in enumerate(samples):
-            header = f"0x{s[0]:02X} 0x{s[1]:02X} 0x{s[2]:02X} 0x{s[3]:02X}"
-            is_discard = (s[0] & 0x0F) == 0x0F
-            status = "DISCARD" if is_discard else f"Packet Num: {s[1]}"
-            if s[0] == 0 and s[1] == 0 and s[2] == 0 and s[3] == 0:
-                status = "ALL ZEROS (MISO low / disconnected)"
-            elif s[0] == 255 and s[1] == 255 and s[2] == 255 and s[3] == 255:
-                status = "ALL ONES (MISO high / disconnected)"
-            print(f"    Packet {idx:02d}: {header} ({status})")
-    except Exception as exc:
-        print(f"  [Diag] Raw SPI read failed: {exc}")
+    print(f"\n[Diag] Testing SPI Modes (Mode 3, Mode 0, Mode 1, Mode 2) on /dev/spidev{spi_bus}.{spi_device}...")
+    for mode in (3, 0, 1, 2):
+        try:
+            spi = spidev.SpiDev()
+            spi.open(spi_bus, spi_device)
+            spi.max_speed_hz = 8000000
+            spi.mode = mode
+            
+            samples = []
+            for _ in range(6):
+                packet = spi.readbytes(164)
+                samples.append(packet[:4])
+            spi.close()
+            
+            print(f"  [Diag] SPI Mode {mode} raw headers:")
+            for idx, s in enumerate(samples):
+                header = f"0x{s[0]:02X} 0x{s[1]:02X} 0x{s[2]:02X} 0x{s[3]:02X}"
+                is_discard = (s[0] & 0x0F) == 0x0F
+                pkt_num = s[1]
+                print(f"    Mode {mode} Pkt {idx}: {header} (PktNum={pkt_num}, Discard={is_discard})")
+            time.sleep(0.1)
+        except Exception as exc:
+            print(f"  [Diag] SPI Mode {mode} failed: {exc}")
 
 def main() -> None:
     print("==================================================")

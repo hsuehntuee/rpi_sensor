@@ -70,11 +70,11 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 class VoSPIReader:
-    """Communication class for FLIR Lepton module on SPI using pylepton ioctl method.
+    """Communication class for FLIR Lepton module on SPI.
 
-    Packs 60 spi_ioc_transfer structs into a single buffer and issues one ioctl
-    with _IOW(SPI_IOC_MAGIC, 0, "=QQIIHBBI"). CS stays low for packets 0..58,
-    and is de-asserted (HIGH) on packet 59.
+    Chunks 60 packets into 3 ioctl calls (24, 24, 12 packets) with tx_buf=0.
+    Each ioctl data payload is <= 3936 bytes (under kernel bufsiz 4096).
+    CS stays low for packets 0..58, and is de-asserted (HIGH) on packet 59.
     """
 
     XFER_STRUCT = struct.Struct("=QQIIHBBI")
@@ -86,30 +86,43 @@ class VoSPIReader:
         self.mode = mode
         self.fd = -1
         
-        # Buffers
-        self._txbuf = np.zeros(PACKET_WORDS, dtype=np.uint16)
+        # Buffer for full frame (60 x 82 uint16)
         self._capture_buf = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
         
-        # Pre-build 60 spi_ioc_transfer structs (1920 bytes)
+        # 3 chunks: (start_pkt, num_pkts) -> (0,24), (24,24), (48,12)
+        self.chunks = [(0, 24), (24, 24), (48, 12)]
         msg_size = self.XFER_STRUCT.size
-        self._xmit_buf = np.zeros(msg_size * ROWS, dtype=np.uint8)
         
-        for i in range(ROWS):
-            cs_change = 1 if i == (ROWS - 1) else 0
-            self.XFER_STRUCT.pack_into(
-                self._xmit_buf, i * msg_size,
-                0,                                                             # tx_buf = 0 (read-only)
-                self._capture_buf.ctypes.data + PACKET_BYTES * i,               # rx_buf
-                PACKET_BYTES,                                                  # len (164 bytes)
-                self.speed,                                                    # speed_hz
-                0,                                                             # delay_usecs
-                8,                                                             # bits_per_word
-                cs_change,                                                     # cs_change
-                0,                                                             # pad
-            )
+        self._msg_bufs = []
+        self._ioc_cmds = []
         
-        # ioctl command using single struct size (32 bytes) matching pylepton
-        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
+        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
+            buf_bytes = msg_size * num_pkts
+            buf = np.zeros(buf_bytes, dtype=np.uint8)
+            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
+            
+            for i in range(num_pkts):
+                global_pkt = start_pkt + i
+                is_last_pkt = is_last_chunk and (i == num_pkts - 1)
+                cs_change = 1 if is_last_pkt else 0
+                rx_ptr = self._capture_buf.ctypes.data + PACKET_BYTES * global_pkt
+                
+                self.XFER_STRUCT.pack_into(
+                    buf, i * msg_size,
+                    0,                                                         # tx_buf = 0 (read-only)
+                    rx_ptr,                                                    # rx_buf
+                    PACKET_BYTES,                                              # len (164 bytes)
+                    self.speed,                                                # speed_hz
+                    0,                                                         # delay_usecs
+                    8,                                                         # bits_per_word
+                    cs_change,                                                 # cs_change
+                    0,                                                         # pad
+                )
+            
+            self._msg_bufs.append(buf)
+            # cmd size must be total bytes of structs in this ioctl call
+            cmd = _IOC(1, SPI_IOC_MAGIC, 0, buf_bytes)
+            self._ioc_cmds.append(cmd)
 
     def open(self):
         self.fd = os.open(self.dev_path, os.O_RDWR)
@@ -123,8 +136,9 @@ class VoSPIReader:
             self.fd = -1
 
     def read_frame_raw(self) -> np.ndarray:
-        """Issue pylepton ioctl call (60 packets, CS low until pkt 59)."""
-        fcntl.ioctl(self.fd, self._spi_ioc_msg, self._xmit_buf)
+        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all 60 pkts."""
+        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
+            fcntl.ioctl(self.fd, cmd, buf)
         return self._capture_buf.copy()
 
 

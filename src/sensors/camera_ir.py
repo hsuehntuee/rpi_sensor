@@ -226,23 +226,43 @@ class LeptonVoSPI:
         self._txbuf = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._capture_buf = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
 
-        # Pre-build spi_ioc_transfer structs (32 * rows_per_read bytes)
-        msg_sz = self.XFER_STRUCT.size
-        self._xmit_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
+        # Chunk frame packets into ioctl calls of at most 24 packets (3936 bytes <= 4096 bufsiz)
+        if self.rows_per_read <= 24:
+            self.chunks = [(0, self.rows_per_read)]
+        else:
+            # 60 rows -> (0,24), (24,24), (48,12)
+            self.chunks = [(0, 24), (24, 24), (48, 12)]
 
-        for i in range(self.rows_per_read):
-            cs_change = 1 if i == (self.rows_per_read - 1) else 0
-            self.XFER_STRUCT.pack_into(
-                self._xmit_buf, i * msg_sz,
-                0,                                                               # tx_buf = 0 (read-only)
-                self._capture_buf.ctypes.data + self.PACKET_BYTES * i,            # rx_buf
-                self.PACKET_BYTES,                                               # len (164 bytes)
-                self.spi_speed,                                                  # speed_hz
-                0,                                                               # delay_usecs
-                8,                                                               # bits_per_word
-                cs_change,                                                       # cs_change
-                0,                                                               # pad
-            )
+        msg_sz = self.XFER_STRUCT.size
+        self._msg_bufs = []
+        self._ioc_cmds = []
+
+        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
+            buf_bytes = msg_sz * num_pkts
+            buf = np.zeros(buf_bytes, dtype=np.uint8)
+            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
+
+            for i in range(num_pkts):
+                global_pkt = start_pkt + i
+                is_last_pkt = is_last_chunk and (i == num_pkts - 1)
+                cs_change = 1 if is_last_pkt else 0
+                rx_ptr = self._capture_buf.ctypes.data + self.PACKET_BYTES * global_pkt
+
+                self.XFER_STRUCT.pack_into(
+                    buf, i * msg_sz,
+                    0,                                                               # tx_buf = 0 (read-only)
+                    rx_ptr,                                                          # rx_buf
+                    self.PACKET_BYTES,                                               # len (164 bytes)
+                    self.spi_speed,                                                  # speed_hz
+                    0,                                                               # delay_usecs
+                    8,                                                               # bits_per_word
+                    cs_change,                                                       # cs_change
+                    0,                                                               # pad
+                )
+
+            self._msg_bufs.append(buf)
+            cmd = self._ioc(1, M, 0, buf_bytes)
+            self._ioc_cmds.append(cmd)
 
     def open(self) -> None:
         import os as _os, fcntl as _fcntl
@@ -264,9 +284,10 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_raw(self) -> np.ndarray:
-        """Issue pylepton ioctl call (CS low until last packet)."""
+        """Issue 3 chunked ioctl calls (24, 24, 12 pkts). CS stays low across all pkts."""
         import fcntl as _fcntl
-        _fcntl.ioctl(self.fd, self._IOC_MSG, self._xmit_buf)
+        for cmd, buf in zip(self._ioc_cmds, self._msg_bufs):
+            _fcntl.ioctl(self.fd, cmd, buf)
         return self._capture_buf.copy()
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:

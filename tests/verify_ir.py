@@ -50,7 +50,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 8_000_000          # 8 MHz (Maximum signal stability over Dupont jumper wires)
+SPI_SPEED    = 20_000_000         # 20 MHz (FLIR Lepton Datasheet: minimum 10MHz required to prevent FIFO underflow)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 
@@ -130,6 +130,13 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
         raw_bytes = reader.read_frame_bytes()
         n_bytes = len(raw_bytes)
         
+        # Diagnostic dump on first attempt
+        if attempt == 0:
+            print("  [Diag] First 5 packet headers in 19680B transfer:")
+            for i in range(5):
+                off = i * PACKET_BYTES
+                print(f"    Header {i}: b0=0x{raw_bytes[off]:02X}, b1={raw_bytes[off+1]}")
+
         # Scan for Packet 0 within the single 19680-byte CS-LOW stream
         for idx in range(0, n_bytes - FRAME_BYTES, PACKET_BYTES):
             b0 = raw_bytes[idx]

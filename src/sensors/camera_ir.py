@@ -386,17 +386,20 @@ class PiIRCamera(RGBCamera):
             self.vospi.open()
             raw_frame = self.vospi.read_frame()
 
-            # Human Face Thermal Enhancer: 5th-95th percentile clipping for human skin contrast
-            p_min = np.percentile(raw_frame, 5)
-            p_max = np.percentile(raw_frame, 95)
-            if p_max > p_min:
-                clipped = np.clip(raw_frame, p_min, p_max)
-                scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
-            else:
-                scaled = np.zeros(raw_frame.shape, dtype=np.uint8)
+            clean_frame = raw_frame & 0x3FFF
+            f_min = clean_frame.min()
+            f_max = clean_frame.max()
 
-            # Horizontal Flip (Mirror correction for natural face preview)
-            scaled = np.fliplr(scaled)
+            if f_max > f_min:
+                scaled_minmax = ((clean_frame.astype(np.float32) - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
+                hist, bins = np.histogram(scaled_minmax.flatten(), 256, [0, 256])
+                cdf = hist.cumsum()
+                cdf_m = np.ma.masked_equal(cdf, 0)
+                cdf_m = (cdf_m - cdf_m.min()) * 255 / (cdf_m.max() - cdf_m.min())
+                cdf_final = np.ma.filled(cdf_m, 0).astype('uint8')
+                scaled = cdf_final[scaled_minmax]
+            else:
+                scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
             if self.colormap == "gray":
                 img = Image.fromarray(scaled, mode="L")

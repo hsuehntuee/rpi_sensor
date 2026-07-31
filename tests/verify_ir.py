@@ -273,41 +273,51 @@ def main() -> None:
 
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     
-    # ── Human Face Thermal Enhancer (5th-95th Percentile Clipping) ──
-    # Ignore background cold walls and hot spots, focus dynamic range on human skin
-    p_min = np.percentile(frame, 5)
-    p_max = np.percentile(frame, 95)
-    print(f"  Frame stats: raw_min={frame.min()}, raw_max={frame.max()}, p5={p_min:.0f}, p95={p_max:.0f}")
+    # ── 1. 14-Bit Masking & Telemetry Cleanup ──
+    # FLIR Lepton 2.5 raw values are 14-bit (0..16383). Bits 14-15 contain status flags.
+    clean_frame = frame & 0x3FFF
+    f_min = clean_frame.min()
+    f_max = clean_frame.max()
+    print(f"  Clean 14-bit frame stats: min={f_min}, max={f_max}, shape={clean_frame.shape}")
 
-    if p_max > p_min:
-        clipped = np.clip(frame, p_min, p_max)
-        scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
+    # ── 2. Histogram Equalization (Contrast Optimization for Human Skin) ──
+    if f_max > f_min:
+        # Standard Min-Max scaling
+        scaled_minmax = ((clean_frame.astype(np.float32) - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
+        
+        # Histogram Equalization for maximum facial detail
+        hist, bins = np.histogram(scaled_minmax.flatten(), 256, [0, 256])
+        cdf = hist.cumsum()
+        cdf_m = np.ma.masked_equal(cdf, 0)
+        cdf_m = (cdf_m - cdf_m.min()) * 255 / (cdf_m.max() - cdf_m.min())
+        cdf_final = np.ma.filled(cdf_m, 0).astype('uint8')
+        scaled = cdf_final[scaled_minmax]
     else:
-        scaled = np.zeros(frame.shape, dtype=np.uint8)
+        scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
-    # Horizontal Flip (Mirror correction for natural face preview)
-    scaled = np.fliplr(scaled)
-
-    # Save Grayscale image (upscaled 8x to 640x480 for clear HD viewing)
-    filename_gray = f"{timestamp}_ir_gray.jpg"
-    save_path_gray = image_dir / filename_gray
-    img_gray = Image.fromarray(scaled, mode="L")
-    img_gray_hd = img_gray.resize((640, 480), Image.Resampling.BICUBIC)
-    img_gray_hd.save(save_path_gray, format="JPEG", quality=95)
-
-    # Save Ironbow Color Thermal image (upscaled 8x to 640x480 HD)
-    filename_color = f"{timestamp}_ir_color.jpg"
+    # Save Normal Color Thermal image (upscaled 8x to 640x480 HD)
+    filename_color = f"{timestamp}_ir_face_hd.jpg"
     save_path_color = image_dir / filename_color
     rgb_array = apply_thermal_colormap(scaled, colormap="ironbow")
     img_color = Image.fromarray(rgb_array, mode="RGB")
     img_color_hd = img_color.resize((640, 480), Image.Resampling.BICUBIC)
     img_color_hd.save(save_path_color, format="JPEG", quality=95)
 
-    print(f"\n  SUCCESS: Saved Grayscale thermal image to {save_path_gray}")
-    print(f"  SUCCESS: Saved Ironbow COLOR thermal image to {save_path_color}")
+    # Save Rotated 90° HD image (in case breakout board is mounted sideways)
+    filename_rot90 = f"{timestamp}_ir_face_rot90.jpg"
+    save_path_rot90 = image_dir / filename_rot90
+    img_rot90 = img_color.rotate(90, expand=True).resize((480, 640), Image.Resampling.BICUBIC)
+    img_rot90.save(save_path_rot90, format="JPEG", quality=95)
 
-    if image_dir == Path("/data"):
-        print(f"  Host path: ./data/{filename_gray}")
+    # Save Rotated 270° HD image
+    filename_rot270 = f"{timestamp}_ir_face_rot270.jpg"
+    save_path_rot270 = image_dir / filename_rot270
+    img_rot270 = img_color.rotate(270, expand=True).resize((480, 640), Image.Resampling.BICUBIC)
+    img_rot270.save(save_path_rot270, format="JPEG", quality=95)
+
+    print(f"\n  SUCCESS: Saved HD Thermal Face image to {save_path_color}")
+    print(f"  SUCCESS: Saved Rotated 90° image to {save_path_rot90}")
+    print(f"  SUCCESS: Saved Rotated 270° image to {save_path_rot270}")
 
     print("\n" + "=" * 60)
     print("            Test Completed Successfully")

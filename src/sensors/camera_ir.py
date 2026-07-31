@@ -235,13 +235,43 @@ class LeptonVoSPI:
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
-        if self.spi is None:
-            self.open()
 
         raw_frame = np.zeros((self.height, self.width), dtype=np.uint16)
 
         if not self.is_lepton3:
-            # ── Lepton 2.x: 60 packets per frame ──
+            # ── 1. Try Native C High-Performance Driver ──
+            c_path = Path(__file__).parent / "lepton_capture.c"
+            so_path = Path(__file__).parent / "liblepton.so"
+            if c_path.exists():
+                try:
+                    if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
+                        import subprocess
+                        subprocess.run(
+                            ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
+                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                        )
+                    import ctypes
+                    lib = ctypes.CDLL(str(so_path))
+                    lib.capture_lepton_frame.argtypes = [
+                        ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
+                    ]
+                    lib.capture_lepton_frame.restype = ctypes.c_int
+
+                    frame_buf = (ctypes.c_uint16 * (self.width * self.height))()
+                    dev_path = f"/dev/spidev{self.spi_bus}.{self.spi_device}".encode("utf-8")
+                    self.close()
+
+                    attempts = lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, max_retries)
+                    if attempts > 0:
+                        arr = np.ctypeslib.as_array(frame_buf).reshape((self.height, self.width)).copy()
+                        return arr
+                except Exception:
+                    pass
+
+            # ── 2. Fallback Python Reader ──
+            if self.spi is None:
+                self.open()
+
             packets = [None] * self.height
             collected = 0
             discard_streak = 0

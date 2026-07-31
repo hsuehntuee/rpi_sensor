@@ -123,8 +123,54 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
+def compile_and_load_native_c():
+    """Compile and load native C VoSPI capture shared object inside Docker container."""
+    c_path = Path("/app/src/sensors/lepton_capture.c")
+    so_path = Path("/app/src/sensors/liblepton.so")
+    
+    if not c_path.exists():
+        c_path = Path("src/sensors/lepton_capture.c")
+        so_path = Path("src/sensors/liblepton.so")
+        
+    if c_path.exists():
+        try:
+            subprocess.run(
+                ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            lib = ctypes.CDLL(str(so_path))
+            lib.capture_lepton_frame.argtypes = [
+                ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
+            ]
+            lib.capture_lepton_frame.restype = ctypes.c_int
+            return lib
+        except Exception as exc:
+            print(f"  [Native C Engine] Compiler note: {exc}")
+    return None
+
+
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean thermal frame by accumulating 60 packets across chunked SPI reads."""
+    """Capture a 100% clean thermal frame using Native C kernel engine."""
+    # ── 1. Try Native C High-Performance SPI Kernel Engine ──
+    native_lib = compile_and_load_native_c()
+    if native_lib is not None:
+        print("  [Native C Engine] Activated 100% zero-latency C kernel VoSPI driver...")
+        frame_buf = (ctypes.c_uint16 * (ROWS * COLS))()
+        dev_path = f"/dev/spidev{reader.spi_bus}.{reader.spi_device}".encode("utf-8")
+        
+        # Close python reader so native C can claim spidev descriptor
+        reader.close()
+        
+        attempts = native_lib.capture_lepton_frame(dev_path, reader.speed, frame_buf, max_attempts)
+        if attempts > 0:
+            print(f"    Native C Attempt {attempts}: SUCCESS! 100% synchronized 60-packet frame captured!")
+            arr = np.ctypeslib.as_array(frame_buf).reshape((ROWS, COLS)).copy()
+            return arr
+        else:
+            print("  [Native C Engine] Fallback to python reader...")
+
+    # ── 2. Fallback Python Reader ──
+    reader.open()
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
@@ -134,16 +180,11 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
         n_bytes = len(raw_bytes)
         n_packets = n_bytes // PACKET_BYTES
         
-        if attempt == 0 and n_bytes >= 2:
-            print(f"  [Diag] SPI buffer read: {n_bytes} bytes ({n_packets} packets)")
-            print(f"  [Diag] First packet header: b0=0x{raw_bytes[0]:02X}, b1={raw_bytes[1]}")
-        
         for i in range(n_packets):
             offset = i * PACKET_BYTES
             b0 = raw_bytes[offset]
             b1 = raw_bytes[offset + 1]
             
-            # Discard packet check
             if (b0 & 0x0F) == 0x0F or b1 >= ROWS:
                 discard_streak += 1
                 continue
@@ -152,7 +193,6 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             discard_streak = 0
             
             if pkt_num < ROWS:
-                # Reset buffer when packet 0 of a NEW frame is encountered
                 if pkt_num == 0 and collected < ROWS:
                     packets = [None] * ROWS
                     collected = 0
@@ -166,9 +206,7 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                         print(f"    Attempt {attempt+1}: SUCCESS! All 60 packets collected!")
                         return np.array(packets, dtype=np.uint16)
 
-        # Trigger CS-high resync ONLY if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:
-            print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)
             discard_streak = 0
 

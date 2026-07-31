@@ -9,6 +9,7 @@ try:
     from src.sensors.camera_ir import probe_lepton, PiIRCamera
     from smbus2 import SMBus, i2c_msg
     from src.config import load_settings
+    import spidev
 except ImportError as err:
     print(f"Error importing modules: {err}")
     print("Please make sure you are running this from the project root directory.")
@@ -27,6 +28,33 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
     except Exception as exc:
         print(f"  [Diag] Failed to read raw status register over I2C: {exc}")
         return None
+
+def debug_spi(spi_bus: int = 0, spi_device: int = 0) -> None:
+    print(f"\n[Diag] Starting raw SPI debug on /dev/spidev{spi_bus}.{spi_device}...")
+    try:
+        spi = spidev.SpiDev()
+        spi.open(spi_bus, spi_device)
+        spi.max_speed_hz = 8000000
+        spi.mode = 3
+        
+        samples = []
+        for _ in range(20):
+            packet = spi.readbytes(164)
+            samples.append(packet[:4])
+        spi.close()
+        
+        print("  [Diag] First 4 bytes of 20 consecutive SPI packets:")
+        for idx, s in enumerate(samples):
+            header = f"0x{s[0]:02X} 0x{s[1]:02X} 0x{s[2]:02X} 0x{s[3]:02X}"
+            is_discard = (s[0] & 0x0F) == 0x0F
+            status = "DISCARD" if is_discard else f"Packet Num: {s[1]}"
+            if s[0] == 0 and s[1] == 0 and s[2] == 0 and s[3] == 0:
+                status = "ALL ZEROS (MISO low / disconnected)"
+            elif s[0] == 255 and s[1] == 255 and s[2] == 255 and s[3] == 255:
+                status = "ALL ONES (MISO high / disconnected)"
+            print(f"    Packet {idx:02d}: {header} ({status})")
+    except Exception as exc:
+        print(f"  [Diag] Raw SPI read failed: {exc}")
 
 def main() -> None:
     print("==================================================")
@@ -74,6 +102,9 @@ def main() -> None:
         print(f"  WARNING: Could not fetch Lepton part number over I2C.")
         print(f"  Error details: {exc}")
         print("  We will attempt to test the SPI camera capture using fallback resolutions.")
+
+    # Run SPI Raw Diagnostics
+    debug_spi(spi_bus=0, spi_device=0)
 
     # 2. Capture a test image using SPI VoSPI
     print("\n[2/2] Attempting to capture a frame over SPI (SPI0 CE0)...")

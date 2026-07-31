@@ -1,3 +1,15 @@
+"""
+FLIR Lepton IR Camera – Hardware Verification Script
+=====================================================
+Uses raw ioctl SPI_IOC_MESSAGE to read entire VoSPI frames in a single
+kernel call, keeping CS low across all 60 packets (matching pylepton's
+proven approach).  This avoids the per-packet CS toggle that causes
+permanent desynchronisation on Raspberry Pi 5 / RP1.
+"""
+import ctypes
+import fcntl
+import os
+import struct
 import sys
 import time
 from pathlib import Path
@@ -6,162 +18,289 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 try:
-    from src.sensors.camera_ir import probe_lepton, PiIRCamera
     from smbus2 import SMBus, i2c_msg
     from src.config import load_settings
-    import spidev
+    import numpy as np
+    from PIL import Image
 except ImportError as err:
     print(f"Error importing modules: {err}")
-    print("Please make sure you are running this from the project root directory.")
     sys.exit(1)
 
+# ── SPI ioctl constants ──────────────────────────────────────────────
+SPI_IOC_MAGIC = ord("k")
+
+def _IOC(direction, itype, nr, size):
+    return (direction << 30) | (itype << 8) | nr | (size << 16)
+
+def _IOW(itype, nr, fmt):
+    return _IOC(1, itype, nr, struct.calcsize(fmt))
+
+def _IOR(itype, nr, fmt):
+    return _IOC(2, itype, nr, struct.calcsize(fmt))
+
+SPI_IOC_WR_MODE          = _IOW(SPI_IOC_MAGIC, 1, "=B")
+SPI_IOC_WR_BITS_PER_WORD = _IOW(SPI_IOC_MAGIC, 3, "=B")
+SPI_IOC_WR_MAX_SPEED_HZ  = _IOW(SPI_IOC_MAGIC, 4, "=I")
+SPI_IOC_RD_MODE          = _IOR(SPI_IOC_MAGIC, 1, "=B")
+
+# ── VoSPI constants ──────────────────────────────────────────────────
+ROWS         = 60
+COLS         = 80
+PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
+PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
+FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
+SPI_SPEED    = 10_000_000         # 10 MHz (conservative for RPi5)
+SPI_MODE     = 3                  # CPOL=1, CPHA=1
+
+
 def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
+    """Read Lepton status register over I2C."""
     try:
         with SMBus(bus_number) as bus:
-            # Register 0x0002 is the Status Register
             register = 0x0002
-            request = i2c_msg.write(address, [(register >> 8) & 0xFF, register & 0xFF])
-            response = i2c_msg.read(address, 2)
-            bus.i2c_rdwr(request, response)
-            raw = list(response)
+            req = i2c_msg.write(address, [(register >> 8) & 0xFF, register & 0xFF])
+            resp = i2c_msg.read(address, 2)
+            bus.i2c_rdwr(req, resp)
+            raw = list(resp)
             return (raw[0] << 8) | raw[1]
     except Exception as exc:
-        print(f"  [Diag] Failed to read raw status register over I2C: {exc}")
+        print(f"  [Diag] I2C status read failed: {exc}")
         return None
 
-def debug_spi(spi_bus: int = 0, spi_device: int = 0) -> None:
-    print(f"\n[Diag] Testing SPI Modes (Mode 3, Mode 0, Mode 1, Mode 2) on /dev/spidev{spi_bus}.{spi_device}...")
-    for mode in (3, 0, 1, 2):
-        try:
-            spi = spidev.SpiDev()
-            spi.open(spi_bus, spi_device)
-            spi.max_speed_hz = 8000000
-            spi.mode = mode
-            
-            samples = []
-            for _ in range(6):
-                packet = spi.readbytes(164)
-                samples.append(packet[:4])
-            spi.close()
-            
-            print(f"  [Diag] SPI Mode {mode} raw headers:")
-            for idx, s in enumerate(samples):
-                header = f"0x{s[0]:02X} 0x{s[1]:02X} 0x{s[2]:02X} 0x{s[3]:02X}"
-                is_discard = (s[0] & 0x0F) == 0x0F
-                pkt_num = s[1]
-                print(f"    Mode {mode} Pkt {idx}: {header} (PktNum={pkt_num}, Discard={is_discard})")
-            time.sleep(0.1)
-        except Exception as exc:
-            print(f"  [Diag] SPI Mode {mode} failed: {exc}")
+
+class VoSPIReader:
+    """Read Lepton VoSPI frames using raw ioctl (no spidev Python module).
+
+    This mirrors the approach used by pylepton: open /dev/spidevX.Y directly,
+    configure SPI via ioctl, and issue a multi-message SPI_IOC_MESSAGE ioctl
+    that keeps CS asserted across the entire frame.
+    """
+
+    # struct spi_ioc_transfer layout (matches kernel, 64-bit aligned)
+    #   __u64  tx_buf
+    #   __u64  rx_buf
+    #   __u32  len
+    #   __u32  speed_hz
+    #   __u16  delay_usecs
+    #   __u8   bits_per_word
+    #   __u8   cs_change
+    #   __u32  pad
+    XFER_STRUCT = struct.Struct("=QQIIHBBI")
+
+    def __init__(self, spi_bus: int = 0, spi_device: int = 0,
+                 speed: int = SPI_SPEED, mode: int = SPI_MODE):
+        self.dev_path = f"/dev/spidev{spi_bus}.{spi_device}"
+        self.speed = speed
+        self.mode = mode
+        self.fd = -1
+        # TX buffer (all zeros – we only read)
+        self._tx = np.zeros(PACKET_WORDS, dtype=np.uint16)
+        # RX buffer for one full frame
+        self._rx = np.zeros((ROWS, PACKET_WORDS), dtype=np.uint16)
+        # Pre-build the ioctl message buffer (60 spi_ioc_transfer structs)
+        msg_size = self.XFER_STRUCT.size
+        self._msg_buf = np.zeros(msg_size * ROWS, dtype=np.uint8)
+        for i in range(ROWS):
+            self.XFER_STRUCT.pack_into(
+                self._msg_buf, i * msg_size,
+                self._tx.ctypes.data,                                  # tx_buf
+                self._rx.ctypes.data + PACKET_BYTES * i,               # rx_buf
+                PACKET_BYTES,                                          # len
+                self.speed,                                            # speed_hz
+                0,                                                     # delay_usecs
+                8,                                                     # bits_per_word
+                0,                                                     # cs_change
+                0,                                                     # pad
+            )
+        # ioctl request code for SPI_IOC_MESSAGE(ROWS)
+        self._spi_ioc_msg = _IOW(SPI_IOC_MAGIC, 0, self.XFER_STRUCT.format)
+
+    def open(self):
+        self.fd = os.open(self.dev_path, os.O_RDWR)
+        fcntl.ioctl(self.fd, SPI_IOC_WR_MODE, struct.pack("=B", self.mode))
+        fcntl.ioctl(self.fd, SPI_IOC_WR_BITS_PER_WORD, struct.pack("=B", 8))
+        fcntl.ioctl(self.fd, SPI_IOC_WR_MAX_SPEED_HZ, struct.pack("=I", self.speed))
+
+    def close(self):
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    def read_frame_raw(self) -> np.ndarray:
+        """Issue one SPI_IOC_MESSAGE ioctl that reads 60 packets (CS stays low).
+        Returns the raw rx buffer (60 x 82 uint16)."""
+        fcntl.ioctl(self.fd, self._spi_ioc_msg, self._msg_buf)
+        return self._rx.copy()
+
+
+def resync(reader: VoSPIReader, delay: float = 0.2):
+    """VoSPI resync: hold CS high for ≥185ms by closing and reopening SPI."""
+    reader.close()
+    time.sleep(delay)
+    reader.open()
+
+
+def dump_frame_headers(raw: np.ndarray, label: str = ""):
+    """Print the first few packet headers from a raw frame read."""
+    print(f"  {label} Packet headers (first 10 of {raw.shape[0]}):")
+    for i in range(min(10, raw.shape[0])):
+        # VoSPI header: word0 = (ID_hi << 8 | ID_lo),  word1 = CRC
+        w0 = int(raw[i, 0])
+        b0 = (w0 >> 8) & 0xFF
+        b1 = w0 & 0xFF
+        is_discard = (b0 & 0x0F) == 0x0F
+        pkt_num = b1
+        print(f"    Pkt {i:02d}: 0x{b0:02X} 0x{b1:02X}  "
+              f"(PktNum={pkt_num}, Discard={is_discard})")
+
+
+def try_capture(reader: VoSPIReader, max_attempts: int = 20) -> np.ndarray | None:
+    """Try to capture a valid 80x60 Lepton 2.x frame.
+    
+    Returns a 60x80 uint16 raw thermal array, or None on failure.
+    """
+    for attempt in range(max_attempts):
+        raw = reader.read_frame_raw()
+        
+        # Check first packet
+        w0 = int(raw[0, 0])
+        b0 = (w0 >> 8) & 0xFF
+        b1 = w0 & 0xFF
+        is_discard = (b0 & 0x0F) == 0x0F
+        
+        if is_discard:
+            if attempt < 3 or attempt % 5 == 0:
+                print(f"    Attempt {attempt+1}: discard frame, resyncing...")
+            resync(reader, 0.2)
+            continue
+        
+        # Check if this looks like a valid frame (packet 0 should be first)
+        pkt0 = b1
+        if pkt0 != 0:
+            if attempt < 3:
+                print(f"    Attempt {attempt+1}: first packet is #{pkt0}, not #0. Resyncing...")
+            resync(reader, 0.2)
+            continue
+        
+        # Verify packet sequence
+        valid = True
+        for row in range(ROWS):
+            w = int(raw[row, 0])
+            hb = (w >> 8) & 0xFF
+            lb = w & 0xFF
+            if (hb & 0x0F) == 0x0F:
+                valid = False
+                break
+            if lb != row:
+                valid = False
+                break
+        
+        if valid:
+            print(f"    Attempt {attempt+1}: VALID frame captured!")
+            # Extract pixel data (skip 2-word header per packet)
+            frame = raw[:, 2:].copy()
+            return frame
+        else:
+            if attempt < 3:
+                print(f"    Attempt {attempt+1}: packet sequence invalid, resyncing...")
+            resync(reader, 0.2)
+    
+    return None
+
 
 def main() -> None:
-    print("==================================================")
-    print("      FLIR Lepton IR Camera Test Script           ")
-    print("==================================================")
-    
-    # Load settings from .env
-    env_width, env_height = None, None
+    print("=" * 60)
+    print("      FLIR Lepton IR Camera Test Script (ioctl mode)")
+    print("=" * 60)
+
+    # Load settings
+    env_width, env_height = 80, 60
     try:
         settings = load_settings()
-        env_width = settings.lepton_width
-        env_height = settings.lepton_height
-        if env_width is not None and env_height is not None:
-            print(f"Loaded config from .env: LEPTON_WIDTH={env_width}, LEPTON_HEIGHT={env_height}")
-    except Exception as exc:
-        print(f"Info: Could not load .env settings file: {exc}")
+        if settings.lepton_width:
+            env_width = settings.lepton_width
+        if settings.lepton_height:
+            env_height = settings.lepton_height
+        print(f"Config: LEPTON_WIDTH={env_width}, LEPTON_HEIGHT={env_height}")
+    except Exception:
+        print("Info: Using default 80x60")
 
-    # 1. Probe the camera over I2C CCI
-    print("\n[1/2] Probing Lepton CCI (I2C bus 1, address 0x2A)...")
-    
-    # Perform raw diagnostics
+    # ── Step 1: I2C probe ──
+    print("\n[1/3] Probing Lepton CCI (I2C bus 1, address 0x2A)...")
     status_reg = read_raw_status(bus_number=1, address=0x2A)
     if status_reg is not None:
-        print(f"  [Diag] Raw Status Register: 0x{status_reg:04X}")
         busy = bool(status_reg & 0x0001)
-        boot_mode = bool(status_reg & 0x0002)
-        boot_status = bool(status_reg & 0x0004)
-        print(f"  [Diag] Busy Bit (0x0001): {busy}")
-        print(f"  [Diag] Boot Success Bit (0x0004): {boot_status}")
+        boot_ok = bool(status_reg & 0x0004)
+        print(f"  Status Register: 0x{status_reg:04X}  "
+              f"(Busy={busy}, BootOK={boot_ok})")
+        if not boot_ok:
+            print("  WARNING: Boot not complete. Lepton may still be starting up.")
     else:
-        print(f"  [Diag] No response or error reading status register.")
+        print("  ERROR: Cannot reach Lepton over I2C. Check SDA/SCL wiring.")
 
-    model = None
+    # ── Step 2: Raw SPI frame read ──
+    print("\n[2/3] Raw SPI frame read (ioctl, CS held low across 60 packets)...")
+    reader = VoSPIReader(spi_bus=0, spi_device=0, speed=SPI_SPEED, mode=SPI_MODE)
     try:
-        model = probe_lepton(
-            bus_number=1,
-            address=0x2A,
-            fallback_width=env_width,
-            fallback_height=env_height
-        )
-        print(f"  SUCCESS: Detected {model.family}")
-        print(f"  Details: Part Number = {model.part_number}")
-        print(f"  Resolution: {model.width}x{model.height}")
+        reader.open()
+        print(f"  Opened {reader.dev_path} (Mode={SPI_MODE}, Speed={SPI_SPEED/1e6:.0f}MHz)")
     except Exception as exc:
-        print(f"  WARNING: Could not fetch Lepton part number over I2C.")
-        print(f"  Error details: {exc}")
-        print("  We will attempt to test the SPI camera capture using fallback resolutions.")
-
-    # Run SPI Raw Diagnostics
-    debug_spi(spi_bus=0, spi_device=0)
-
-    # 2. Capture a test image using SPI VoSPI
-    print("\n[2/2] Attempting to capture a frame over SPI (SPI0 CE0)...")
-    image_dir = Path("/data")
-    if not image_dir.exists():
-        print(f"  Info: /data does not exist, falling back to local directory.")
-        image_dir = Path(".")
-    
-    # Determine resolutions to try
-    test_resolutions = []
-    if model is not None:
-        test_resolutions = [(model.width, model.height, model.family)]
-    elif env_width is not None and env_height is not None:
-        # Prioritize the user's configured dimensions from .env
-        test_resolutions = [(env_width, env_height, "Configured in .env")]
-    else:
-        # Fallback list if nothing is set
-        test_resolutions = [
-            (160, 120, "Lepton 3.x (Fallback)"),
-            (80, 60, "Lepton 2.x (Fallback)")
-        ]
-
-    spi_success = False
-    for width, height, name in test_resolutions:
-        # Give the Lepton SPI interface time (CS high) to reset between attempts
-        print(f"\n  Waiting 250ms for Lepton SPI interface to settle...")
-        time.sleep(0.25)
-        print(f"  Trying SPI capture with resolution {width}x{height} ({name})...")
-        try:
-            cam = PiIRCamera(
-                image_dir=image_dir,
-                spi_bus=0,
-                spi_device=0,
-                width=width,
-                height=height
-            )
-            saved_path = cam.capture()
-            print(f"  SUCCESS: Captured IR image using resolution {width}x{height}!")
-            print(f"  Saved to container path: {saved_path.resolve()}")
-            if image_dir == Path("/data"):
-                print(f"  Saved to host directory: ./data/{saved_path.name}")
-            else:
-                print(f"  Saved to host directory: ./{saved_path.name}")
-            spi_success = True
-            break
-        except Exception as exc:
-            print(f"  FAILED with resolution {width}x{height}: {exc}")
-
-    if not spi_success:
-        print("\n  ERROR: SPI capture failed for all test resolutions.")
-        print("\nSuggestions:")
-        print("  - Check SPI wiring (MISO Pin 21, SCLK Pin 23, CS Pin 24).")
-        print("  - Ensure SPI is enabled in /boot/firmware/config.txt (dtparam=spi=on).")
-        print("  - Check if another process is holding the SPI device.")
+        print(f"  ERROR opening SPI device: {exc}")
+        print("  Check: dtparam=spi=on in /boot/firmware/config.txt and reboot.")
         sys.exit(1)
 
-    print("\n==================================================")
-    print("            Test Completed Successfully           ")
-    print("==================================================")
+    # First, do a resync to clear any stale state
+    print("  Performing VoSPI resync (CS high for 200ms)...")
+    resync(reader, 0.2)
+
+    # Read one frame and show headers
+    raw = reader.read_frame_raw()
+    dump_frame_headers(raw, "[Diag]")
+
+    # ── Step 3: Attempt to capture valid frame ──
+    print("\n[3/3] Attempting to capture a valid thermal frame...")
+    resync(reader, 0.2)
+    
+    frame = try_capture(reader, max_attempts=40)
+    reader.close()
+
+    if frame is None:
+        print("\n  ERROR: Could not capture a valid frame after 40 attempts.")
+        print("\nSuggestions:")
+        print("  - Verify /boot/firmware/config.txt has dtparam=spi=on")
+        print("  - Verify there is NO dtoverlay=nospi10 in config.txt")
+        print("  - Check SPI wiring: MISO→Pin21, SCLK→Pin23, CS→Pin24")
+        print("  - Try: sudo reboot  (after fixing config.txt)")
+        sys.exit(1)
+
+    # Save the image
+    image_dir = Path("/data")
+    if not image_dir.exists():
+        image_dir = Path(".")
+
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    filename = f"{timestamp}_ir.jpg"
+    save_path = image_dir / filename
+
+    f_min = frame.min()
+    f_max = frame.max()
+    print(f"  Frame stats: min={f_min}, max={f_max}, shape={frame.shape}")
+
+    if f_max > f_min:
+        scaled = ((frame.astype(np.float32) - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
+    else:
+        scaled = np.zeros(frame.shape, dtype=np.uint8)
+
+    img = Image.fromarray(scaled, mode="L")
+    img.save(str(save_path), format="JPEG", quality=90)
+    print(f"\n  SUCCESS: Saved thermal image to {save_path}")
+    if image_dir == Path("/data"):
+        print(f"  Host path: ./data/{filename}")
+
+    print("\n" + "=" * 60)
+    print("            Test Completed Successfully")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

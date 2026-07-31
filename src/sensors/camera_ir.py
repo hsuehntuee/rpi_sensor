@@ -226,37 +226,25 @@ class LeptonVoSPI:
         self._txbuf = np.zeros(self.PACKET_WORDS, dtype=np.uint16)
         self._capture_buf = np.zeros((self.rows_per_read, self.PACKET_WORDS), dtype=np.uint16)
 
-        # Chunk frame packets into ioctl calls of 10 packets each (1640 bytes payload)
-        if self.rows_per_read <= 10:
-            self.chunks = [(0, self.rows_per_read)]
-        else:
-            # 60 rows -> 6 chunks of 10 rows
-            self.chunks = [(i * 10, 10) for i in range(self.rows_per_read // 10)]
-
+        # Pre-build 60 transfer structs (1920 bytes)
         msg_sz = self.XFER_STRUCT.size
-        self._msg_bufs = []
+        self._xmit_buf = np.zeros(msg_sz * self.rows_per_read, dtype=np.uint8)
 
-        for chunk_idx, (start_pkt, num_pkts) in enumerate(self.chunks):
-            buf = np.zeros(msg_sz, dtype=np.uint8)
-            is_last_chunk = (chunk_idx == len(self.chunks) - 1)
-            cs_change = 1 if is_last_chunk else 0
-
-            rx_ptr = self._capture_buf.ctypes.data + self.PACKET_BYTES * start_pkt
-            chunk_bytes = self.PACKET_BYTES * num_pkts
+        for i in range(self.rows_per_read):
+            cs_change = 1 if i == (self.rows_per_read - 1) else 0
+            rx_ptr = self._capture_buf.ctypes.data + self.PACKET_BYTES * i
 
             self.XFER_STRUCT.pack_into(
-                buf, 0,
+                self._xmit_buf, i * msg_sz,
                 0,                                                               # tx_buf = 0 (read-only)
                 rx_ptr,                                                          # rx_buf
-                chunk_bytes,                                                     # len (1640 bytes for 10 packets)
+                self.PACKET_BYTES,                                               # len (164 bytes)
                 self.spi_speed,                                                  # speed_hz
                 0,                                                               # delay_usecs
                 8,                                                               # bits_per_word
-                cs_change,                                                       # cs_change (1 for last chunk)
+                cs_change,                                                       # cs_change (1 for last pkt)
                 0,                                                               # pad
             )
-
-            self._msg_bufs.append(buf)
 
     def open(self) -> None:
         import os as _os, fcntl as _fcntl
@@ -278,10 +266,9 @@ class LeptonVoSPI:
         self.open()
 
     def _read_frame_raw(self) -> np.ndarray:
-        """Issue 6 ioctl calls (1640B continuous transfers each)."""
+        """Issue single ioctl call (60 packets in one kernel pass)."""
         import fcntl as _fcntl
-        for buf in self._msg_bufs:
-            _fcntl.ioctl(self.fd, self._IOC_MSG, buf)
+        _fcntl.ioctl(self.fd, self._IOC_MSG, self._xmit_buf)
         return self._capture_buf.copy()
 
     def read_frame(self, max_retries: int = 1500) -> np.ndarray:
@@ -294,42 +281,42 @@ class LeptonVoSPI:
 
         if not self.is_lepton3:
             # ── Lepton 2.x: 60 packets per frame ──
+            packets = [None] * self.height
+            collected = 0
             discard_streak = 0
 
             for attempt in range(max_retries):
                 raw = self._read_frame_raw()
-                
-                # Check first packet header
-                w0 = int(raw[0, 0])
-                header_flags = w0 & 0xFF
-                pkt_num = (w0 >> 8) & 0xFF
-
-                if (header_flags & 0x0F) == 0x0F:
-                    discard_streak += 1
-                    if discard_streak > 500:
-                        self._resync(0.25)
-                        discard_streak = 0
-                    continue
-
-                discard_streak = 0
-
-                # Must align to Packet 0 at row 0
-                if pkt_num != 0:
-                    continue
-
-                valid = True
                 for row in range(self.rows_per_read):
-                    w = int(raw[row, 0])
-                    hb = w & 0xFF
-                    lb = (w >> 8) & 0xFF
-                    if (hb & 0x0F) == 0x0F or lb != row:
-                        valid = False
-                        break
+                    w0 = int(raw[row, 0])
+                    header_flags = w0 & 0xFF
+                    pkt_num = (w0 >> 8) & 0xFF
 
-                if valid:
-                    return raw[:, 2:2 + self.width].byteswap()
+                    if (header_flags & 0x0F) == 0x0F:
+                        discard_streak += 1
+                        continue
 
-            raise RuntimeError("Timed out waiting for synchronized Lepton 2.x frame")
+                    discard_streak = 0
+
+                    if pkt_num < self.height:
+                        if pkt_num == 0 and collected < self.height:
+                            packets = [None] * self.height
+                            collected = 0
+
+                        if packets[pkt_num] is None:
+                            packets[pkt_num] = raw[row, 2:2 + self.width].byteswap()
+                            collected += 1
+
+                            if collected == self.height:
+                                for r in range(self.height):
+                                    raw_frame[r, :] = packets[r]
+                                return raw_frame
+
+                if discard_streak > 500:
+                    self._resync(0.25)
+                    discard_streak = 0
+
+            raise RuntimeError("Timed out waiting for Lepton 2.x frame")
 
         else:
             # ── Lepton 3.x: 4 segments × 60 packets ──
@@ -343,7 +330,6 @@ class LeptonVoSPI:
                     segments_data.clear()
                     continue
 
-                # Read segment id from packet 20
                 w20 = int(raw[20, 0])
                 seg_id = ((w20 >> 8) >> 4) & 0x07
                 if seg_id < 1 or seg_id > 4:
@@ -351,7 +337,6 @@ class LeptonVoSPI:
                     segments_data.clear()
                     continue
 
-                # Validate packet sequence
                 valid = True
                 for row in range(60):
                     w = int(raw[row, 0])
@@ -436,12 +421,17 @@ class PiIRCamera(RGBCamera):
             self.vospi.open()
             raw_frame = self.vospi.read_frame()
 
-            f_min = raw_frame.min()
-            f_max = raw_frame.max()
-            if f_max > f_min:
-                scaled = ((raw_frame - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
+            # Human Face Thermal Enhancer: 5th-95th percentile clipping for human skin contrast
+            p_min = np.percentile(raw_frame, 5)
+            p_max = np.percentile(raw_frame, 95)
+            if p_max > p_min:
+                clipped = np.clip(raw_frame, p_min, p_max)
+                scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
             else:
                 scaled = np.zeros(raw_frame.shape, dtype=np.uint8)
+
+            # Horizontal Flip (Mirror correction for natural face preview)
+            scaled = np.fliplr(scaled)
 
             if self.colormap == "gray":
                 img = Image.fromarray(scaled, mode="L")

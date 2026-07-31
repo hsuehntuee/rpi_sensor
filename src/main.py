@@ -212,14 +212,14 @@ def main() -> None:
     # 1. Initialize SCD41 Sensor
     scd41_sensor = None
     try:
-        import board
         import adafruit_scd4x
+        from adafruit_blinka.microcontroller.generic_linux.i2c import I2C as BlinkaI2C
         from src.sensors.scd41 import SCD41Sensor
 
-        i2c_bus = board.I2C()
+        i2c_bus = BlinkaI2C(bus_num=settings.scd41_i2c_bus)
         driver = adafruit_scd4x.SCD4X(i2c_bus)
         scd41_sensor = SCD41Sensor(driver)
-        LOGGER.info("Successfully initialized SCD41 hardware sensor on default I2C bus")
+        LOGGER.info("Successfully initialized SCD41 hardware sensor on I2C bus %d", settings.scd41_i2c_bus)
     except Exception as exc:
         LOGGER.warning("Could not initialize real SCD41 hardware: %s. Using dummy sensor.", exc)
 

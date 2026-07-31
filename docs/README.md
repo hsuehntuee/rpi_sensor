@@ -12,12 +12,12 @@
 | :--- | :--- | :--- | :--- |
 | **Pin 1** | 3.3V Power | **SCD41 - VIN** | SCD41 3.3V 電源輸入 |
 | **Pin 6** | Ground | **SCD41 - GND** | SCD41 地線 |
-| **Pin 3** | GPIO2 (SDA1) | **SCD41 - SDA** | SCD41 I2C1 數據線 |
-| **Pin 5** | GPIO3 (SCL1) | **SCD41 - SCL** | SCD41 I2C1 時鐘線 |
+| **Pin 3** | GPIO2 (SDA1) | **Lepton Breakout - Pin 5 (SDA)** | Lepton CCI I2C1 數據線 (分流) |
+| **Pin 5** | GPIO3 (SCL1) | **Lepton Breakout - Pin 8 (SCL)** | Lepton CCI I2C1 時鐘線 (分流) |
 | **Pin 17** | 3.3V Power | **Lepton Breakout - Pin 2 (VIN)** | Lepton 3.3V 電源輸入 (分流) |
 | **Pin 9** | Ground | **Lepton Breakout - Pin 1 (GND)** | Lepton 地線 (分流) |
-| **Pin 32** | GPIO12 (SDA2) | **Lepton Breakout - Pin 5 (SDA)** | Lepton CCI I2C2 數據線 (分流) |
-| **Pin 33** | GPIO13 (SCL2) | **Lepton Breakout - Pin 8 (SCL)** | Lepton CCI I2C2 時鐘線 (分流) |
+| **Pin 32** | GPIO12 (SDA2) | **SCD41 - SDA** | SCD41 I2C2 數據線 |
+| **Pin 33** | GPIO13 (SCL2) | **SCD41 - SCL** | SCD41 I2C2 時鐘線 |
 | **Pin 21** | GPIO9 (SPI MISO)| **Lepton Breakout - Pin 12 (MISO)**| Lepton VoSPI 影像傳輸線 |
 | **Pin 23** | GPIO11 (SCLK) | **Lepton Breakout - Pin 7 (CLK)** | Lepton VoSPI 影像時鐘線 |
 | **Pin 24** | GPIO8 (SPI CE0) | **Lepton Breakout - Pin 10 (CS)** | Lepton VoSPI 影像片選線 |
@@ -26,7 +26,7 @@
 
 ## 2. 樹莓派 OS 前置系統設定
 
-由於 Lepton 相機控制改用獨立的 `I2C2` 匯流排，必須在樹莓派 OS (Bookworm 64-bit) 中載入 Device Tree 覆蓋層：
+由於 SCD41 感測器改用獨立的 `I2C2` 匯流排，必須在樹莓派 OS (Bookworm 64-bit) 中載入 Device Tree 覆蓋層：
 
 1. 編輯設定檔：
    ```bash
@@ -34,13 +34,13 @@
    ```
 2. 在檔案末尾加入以下設定：
    ```text
-   # 啟用 I2C1 (給 SCD41)
+   # 啟用 I2C1 (給 Lepton CCI 控制)
    dtparam=i2c_arm=on
    
    # 啟用 SPI0 (給 Lepton VoSPI 影像讀取)
    dtparam=spi=on
    
-   # 啟用額外的 I2C2 並指定實體腳位 32/33 (給 Lepton CCI 控制)
+   # 啟用額外的 I2C2 並指定實體腳位 32/33 (給 SCD41)
    dtoverlay=i2c2-pi5,pins_12_13
    ```
 3. 保存並重啟樹莓派：
@@ -130,8 +130,8 @@ SERVER_URL=http://your-server-url:8000
 API_KEY=your-secure-api-key-at-least-16-chars
 DATABASE_PATH=/data/sensor.db
 IMAGE_DIR=/data/images
-SCD41_I2C_BUS=1
-LEPTON_I2C_BUS=2
+SCD41_I2C_BUS=2
+LEPTON_I2C_BUS=1
 LEPTON_SPI_BUS=0
 LEPTON_SPI_DEVICE=0
 ```
@@ -154,7 +154,7 @@ docker compose logs -f edge-sensor
 ```
 正常啟動時會輸出以下資訊：
 ```text
-Successfully initialized SCD41 hardware sensor on default I2C bus
+Successfully initialized SCD41 hardware sensor on I2C bus 2
 Successfully initialized RGB PiCamera on index 0
 Detected FLIR Lepton: Lepton 3.5 (160x120)
 Successfully initialized FLIR Lepton IR Camera on SPI bus 0, device 0

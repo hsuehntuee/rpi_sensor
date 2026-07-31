@@ -144,13 +144,11 @@ def dump_frame_headers(raw: np.ndarray, label: str = ""):
     """Print the first few packet headers from a raw frame read."""
     print(f"  {label} Packet headers (first 10 of {raw.shape[0]}):")
     for i in range(min(10, raw.shape[0])):
-        # VoSPI header: word0 = (ID_hi << 8 | ID_lo),  word1 = CRC
         w0 = int(raw[i, 0])
-        b0 = (w0 >> 8) & 0xFF
-        b1 = w0 & 0xFF
-        is_discard = (b0 & 0x0F) == 0x0F
-        pkt_num = b1
-        print(f"    Pkt {i:02d}: 0x{b0:02X} 0x{b1:02X}  "
+        header_flags = w0 & 0xFF
+        pkt_num = (w0 >> 8) & 0xFF
+        is_discard = (header_flags & 0x0F) == 0x0F
+        print(f"    Pkt {i:02d}: Flags=0x{header_flags:02X}  "
               f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
@@ -165,16 +163,15 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | Non
         
         for row in range(ROWS):
             w0 = int(raw[row, 0])
-            b0 = (w0 >> 8) & 0xFF
-            b1 = w0 & 0xFF
+            header_flags = w0 & 0xFF
+            pkt_num = (w0 >> 8) & 0xFF
             
             # Discard packet?
-            if (b0 & 0x0F) == 0x0F:
+            if (header_flags & 0x0F) == 0x0F:
                 discard_streak += 1
                 continue
             
             discard_streak = 0
-            pkt_num = b1
             
             if pkt_num < ROWS:
                 if pkt_num == 0 and collected < ROWS:
@@ -183,7 +180,9 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 50) -> np.ndarray | Non
                     collected = 0
                 
                 if packets[pkt_num] is None:
-                    packets[pkt_num] = raw[row, 2:PACKET_WORDS].copy()
+                    # Store payload word array (byteswap big-endian uint16 from Lepton)
+                    payload = raw[row, 2:PACKET_WORDS].byteswap()
+                    packets[pkt_num] = payload
                     collected += 1
                     
                     if collected == ROWS:

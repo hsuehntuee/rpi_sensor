@@ -291,15 +291,14 @@ class LeptonVoSPI:
                 raw = self._read_frame_raw()
                 for row in range(self.rows_per_read):
                     w0 = int(raw[row, 0])
-                    b0 = (w0 >> 8) & 0xFF
-                    b1 = w0 & 0xFF
+                    header_flags = w0 & 0xFF
+                    pkt_num = (w0 >> 8) & 0xFF
 
-                    if (b0 & 0x0F) == 0x0F:
+                    if (header_flags & 0x0F) == 0x0F:
                         discard_streak += 1
                         continue
 
                     discard_streak = 0
-                    pkt_num = b1
 
                     if pkt_num < self.height:
                         if pkt_num == 0 and collected < self.height:
@@ -307,7 +306,7 @@ class LeptonVoSPI:
                             collected = 0
 
                         if packets[pkt_num] is None:
-                            packets[pkt_num] = raw[row, 2:2 + self.width].copy()
+                            packets[pkt_num] = raw[row, 2:2 + self.width].byteswap()
                             collected += 1
 
                             if collected == self.height:

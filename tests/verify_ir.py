@@ -50,7 +50,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 10_000_000         # 10 MHz (Rock-solid signal timing for RPi5 jumper wires)
+SPI_SPEED    = 8_000_000          # 8 MHz (Maximum signal stability over Dupont jumper wires)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 
@@ -127,9 +127,7 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Try to capture a valid 80x60 Lepton 2.x frame."""
-    packets = [None] * ROWS
-    collected = 0
+    """Capture a 100% single-pass coherent 80x60 thermal frame (rejecting multi-pass stitching)."""
     discard_streak = 0
 
     for attempt in range(max_attempts):
@@ -137,11 +135,14 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
         n_bytes = len(raw_bytes)
         idx = 0
         
+        single_pass_packets = [None] * ROWS
+        collected = 0
+        
         while idx <= n_bytes - PACKET_BYTES:
             b0 = raw_bytes[idx]
             b1 = raw_bytes[idx + 1]
             
-            # FLIR Lepton VoSPI Spec: Discard packet if (b0 & 0x0F == 0x0F) OR packet number >= 60 (e.g. 255)
+            # Discard packet?
             is_discard = ((b0 & 0x0F) == 0x0F) or (b1 >= ROWS)
             if is_discard:
                 discard_streak += 1
@@ -151,24 +152,19 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             pkt_num = b1
             discard_streak = 0
             
-            if pkt_num == 0 and collected < ROWS:
-                packets = [None] * ROWS
-                collected = 0
-            
-            if packets[pkt_num] is None:
-                # Extract 160 payload bytes from exact packet offset `idx`
+            if pkt_num < ROWS and single_pass_packets[pkt_num] is None:
                 payload_bytes = bytes(raw_bytes[idx + 4 : idx + PACKET_BYTES])
-                packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                 collected += 1
-                
-                if collected == ROWS:
-                    print(f"    Attempt {attempt+1}: SUCCESS! All {ROWS} packets collected!")
-                    return np.array(packets, dtype=np.uint16)
             
-            # Advance forward by 164 bytes for next packet
             idx += PACKET_BYTES
 
-        # Trigger CS-high resync only if we see continuous discards for over 500 packets (~2.5s)
+        # REQUIRE ALL 60 ROWS TO BE CAPTURED IN THIS SINGLE PASS
+        if collected == ROWS:
+            print(f"    Attempt {attempt+1}: SUCCESS! Single-pass coherent frame captured!")
+            return np.array(single_pass_packets, dtype=np.uint16)
+
+        # Trigger CS-high resync if we see continuous discards for over 500 packets (~2.5s)
         if discard_streak > 500:
             print(f"    Attempt {attempt+1}: Continuous discards ({discard_streak}), resyncing for 500ms...")
             resync(reader, 0.5)

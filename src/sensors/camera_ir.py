@@ -254,6 +254,9 @@ class LeptonVoSPI:
                 n_bytes = len(raw_bytes)
                 idx = 0
 
+                single_pass_packets = [None] * self.height
+                collected = 0
+
                 while idx <= n_bytes - self.PACKET_BYTES:
                     b0 = raw_bytes[idx]
                     b1 = raw_bytes[idx + 1]
@@ -267,21 +270,17 @@ class LeptonVoSPI:
                     pkt_num = b1
                     discard_streak = 0
 
-                    if pkt_num == 0 and collected < self.height:
-                        packets = [None] * self.height
-                        collected = 0
-
-                    if packets[pkt_num] is None:
+                    if pkt_num < self.height and single_pass_packets[pkt_num] is None:
                         payload_bytes = bytes(raw_bytes[idx + 4 : idx + self.PACKET_BYTES])
-                        packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
+                        single_pass_packets[pkt_num] = np.frombuffer(payload_bytes, dtype=">u2")
                         collected += 1
 
-                        if collected == self.height:
-                            for r in range(self.height):
-                                raw_frame[r, :] = packets[r]
-                            return raw_frame
-
                     idx += self.PACKET_BYTES
+
+                if collected == self.height:
+                    for r in range(self.height):
+                        raw_frame[r, :] = single_pass_packets[r]
+                    return raw_frame
 
                 if discard_streak > 500:
                     self._resync(0.5)

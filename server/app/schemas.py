@@ -15,7 +15,7 @@ class EnvMetricIn(BaseModel):
     @classmethod
     def require_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
-            raise ValueError("timestamp must include a timezone")
+            return value.replace(tzinfo=timezone.utc)
         return value
 
 
@@ -30,7 +30,7 @@ class HVACStatusIn(BaseModel):
     @classmethod
     def require_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
-            raise ValueError("timestamp must include a timezone")
+            return value.replace(tzinfo=timezone.utc)
         return value
 
 
@@ -50,7 +50,7 @@ class MetricsSyncIn(BaseModel):
     @classmethod
     def require_sync_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None:
-            raise ValueError("sync_timestamp must include a timezone")
+            return value.replace(tzinfo=timezone.utc)
         return value
 
 

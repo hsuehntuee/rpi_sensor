@@ -115,6 +115,7 @@ def build_camera_task(
             try:
                 path = camera.capture()
                 database.insert_camera(device_id, image_type, str(path))
+                LOGGER.info("[%s Camera] Saved image to: %s", image_type, path)
             except Exception:
                 LOGGER.exception("%s camera capture failed", image_type)
 
@@ -131,12 +132,16 @@ def build_scd41_hvac_task(
         try:
             reading = scd41.read()
             if reading is not None:
+                temp = float(reading["temperature"])
+                hum = float(reading["humidity"])
+                co2 = int(reading["co2_ppm"])
                 database.insert_env(
                     device_id=device_id,
-                    temperature=float(reading["temperature"]),
-                    humidity=float(reading["humidity"]),
-                    co2_ppm=int(reading["co2_ppm"]),
+                    temperature=temp,
+                    humidity=hum,
+                    co2_ppm=co2,
                 )
+                LOGGER.info("[SCD41 Sensor] Reading: Temp=%.1f°C, Humidity=%.1f%%, CO2=%d ppm", temp, hum, co2)
         except Exception:
             LOGGER.exception("SCD41 read failed")
 

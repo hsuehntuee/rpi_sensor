@@ -139,12 +139,15 @@ class LeptonCCI:
                 )
             _, (family, width, height) = matched
             return LeptonModel(part_number, family, width, height)
+        except LeptonDetectionError:
+            raise
         except Exception as exc:
             if fallback_width is not None and fallback_height is not None:
                 return LeptonModel(
                     "UNKNOWN", "Unknown Lepton (fallback)", fallback_width, fallback_height
                 )
             raise LeptonDetectionError("Lepton CCI probe failed and no fallback dimensions set") from exc
+
 
 
 def probe_lepton(
@@ -315,46 +318,71 @@ class LeptonVoSPI:
 
         else:
             # ── Lepton 3.x: 4 segments × 60 packets ──
+            if self.spi is None:
+                self.open()
+
             segments_data = {}
+            discard_streak = 0
+
             for attempt in range(max_retries * 4):
-                w0 = int(raw[0, 0])
-                header_flags = w0 & 0xFF
-                if (header_flags & 0x0F) == 0x0F:
-                    self._resync(0.2)
-                    segments_data.clear()
+                raw_bytes = self._read_frame_bytes()
+                n_packets = len(raw_bytes) // self.PACKET_BYTES
+                if n_packets < 60:
                     continue
 
-                w20 = int(raw[20, 0])
-                seg_id = ((w20 >> 8) >> 4) & 0x07
+                b0_first = raw_bytes[0]
+                if (b0_first & 0x0F) == 0x0F:
+                    discard_streak += 1
+                    if discard_streak > 500:
+                        self._resync(0.5)
+                        discard_streak = 0
+                        segments_data.clear()
+                    continue
+
+                p20_offset = 20 * self.PACKET_BYTES
+                if p20_offset + 1 < len(raw_bytes):
+                    seg_id = (raw_bytes[p20_offset] >> 4) & 0x07
+                else:
+                    seg_id = 0
+
                 if seg_id < 1 or seg_id > 4:
                     self._resync(0.2)
                     segments_data.clear()
                     continue
 
+                segment_packets = [None] * 60
+                collected = 0
                 valid = True
-                for row in range(60):
-                    w = int(raw[row, 0])
-                    hb = w & 0xFF
-                    lb = (w >> 8) & 0xFF
-                    if (hb & 0x0F) == 0x0F or lb != row:
+
+                for i in range(min(60, n_packets)):
+                    offset = i * self.PACKET_BYTES
+                    b0 = raw_bytes[offset]
+                    b1 = raw_bytes[offset + 1]
+
+                    if (b0 & 0x0F) == 0x0F or b1 != i:
                         valid = False
                         break
 
-                if not valid:
+                    payload = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
+                    segment_packets[i] = np.frombuffer(payload, dtype=">u2")
+                    collected += 1
+
+                if not valid or collected < 60:
                     self._resync(0.2)
                     segments_data.clear()
                     continue
 
-                segments_data[seg_id] = raw[:, 2:2 + self.width].byteswap()
+                discard_streak = 0
+                segments_data[seg_id] = segment_packets
 
                 if len(segments_data) == 4:
                     for seg in range(1, 5):
                         base_row = (seg - 1) * 30
-                        s_pixels = segments_data[seg]
+                        s_packets = segments_data[seg]
                         for p_idx in range(60):
                             row = base_row + (p_idx // 2)
                             col_off = 80 if (p_idx % 2 == 1) else 0
-                            raw_frame[row, col_off:col_off + 80] = s_pixels[p_idx, :]
+                            raw_frame[row, col_off : col_off + 80] = s_packets[p_idx]
                     return raw_frame
 
             raise RuntimeError("Timed out waiting for Lepton 3.x frame segments")
@@ -362,8 +390,18 @@ class LeptonVoSPI:
 
 
 
+def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool = True) -> np.ndarray:
+    """Convert raw 14-bit Lepton pixels directly into absolute Celsius temperatures (°C)."""
+    raw_float = raw_frame.astype(np.float32)
+    if is_tlinear:
+        celsius = (raw_float / 100.0) - 273.15
+    else:
+        celsius = 25.0 + (raw_float - 8192.0) / 40.0
+    return celsius
+
+
 def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") -> np.ndarray:
-    """Map 8-bit grayscale thermal frame to RGB color palette (Ironbow / Rainbow)."""
+    """Map 8-bit thermal frame to RGB color palette (Ironbow / Rainbow / BlackHot / WhiteHot)."""
     lut = np.zeros((256, 3), dtype=np.uint8)
     if colormap == "ironbow":
         # Professional thermal Ironbow: Purple -> Blue -> Red -> Orange -> Yellow -> White
@@ -374,7 +412,7 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
         lut[:, 1] = g.astype(np.uint8)
         lut[:, 2] = b.astype(np.uint8)
     elif colormap == "rainbow":
-        # Classic Rainbow/Jet colormap
+        # Classic Rainbow colormap
         x = np.linspace(0, 1, 256)
         r = np.clip(1.5 - np.abs(x * 4 - 3), 0, 1) * 255
         g = np.clip(1.5 - np.abs(x * 4 - 2), 0, 1) * 255
@@ -382,8 +420,13 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
         lut[:, 0] = r.astype(np.uint8)
         lut[:, 1] = g.astype(np.uint8)
         lut[:, 2] = b.astype(np.uint8)
+    elif colormap == "blackhot":
+        inv = 255 - np.arange(256, dtype=np.uint8)
+        lut[:, 0] = inv
+        lut[:, 1] = inv
+        lut[:, 2] = inv
     else:
-        # Grayscale
+        # Grayscale / WhiteHot
         lut[:, 0] = np.arange(256, dtype=np.uint8)
         lut[:, 1] = np.arange(256, dtype=np.uint8)
         lut[:, 2] = np.arange(256, dtype=np.uint8)
@@ -416,24 +459,30 @@ class PiIRCamera(RGBCamera):
             raw_frame = self.vospi.read_frame()
 
             clean_frame = raw_frame & 0x3FFF
-            f_min = clean_frame.min()
-            f_max = clean_frame.max()
 
-            if f_max > f_min:
-                scaled_minmax = ((clean_frame.astype(np.float32) - f_min) / (f_max - f_min) * 255.0).astype(np.uint8)
-                hist, bins = np.histogram(scaled_minmax.flatten(), 256, [0, 256])
-                cdf = hist.cumsum()
-                cdf_m = np.ma.masked_equal(cdf, 0)
-                cdf_m = (cdf_m - cdf_m.min()) * 255 / (cdf_m.max() - cdf_m.min())
-                cdf_final = np.ma.filled(cdf_m, 0).astype('uint8')
-                scaled = cdf_final[scaled_minmax]
+            # Percentile dynamic range scaling (5% to 95%) - matching verify_ir.py
+            p_min = np.percentile(clean_frame, 5)
+            p_max = np.percentile(clean_frame, 95)
+            if p_max > p_min:
+                clipped = np.clip(clean_frame, p_min, p_max)
+                scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
             else:
                 scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
-            if self.colormap == "gray":
-                img = Image.fromarray(scaled, mode="L")
+            # Horizontal flip matching verify_ir.py
+            scaled = np.fliplr(scaled)
+
+            # De-striping 3x3 median filter matching verify_ir.py
+            rows, cols = scaled.shape
+            destriped = scaled.copy()
+            for r in range(1, rows - 1):
+                for c in range(1, cols - 1):
+                    destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
+
+            if self.colormap in ("gray", "whitehot"):
+                img = Image.fromarray(destriped, mode="L")
             else:
-                rgb_array = apply_thermal_colormap(scaled, colormap=self.colormap)
+                rgb_array = apply_thermal_colormap(destriped, colormap=self.colormap)
                 img = Image.fromarray(rgb_array, mode="RGB")
 
             if self.upscale_factor > 1:

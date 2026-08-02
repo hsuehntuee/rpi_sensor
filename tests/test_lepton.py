@@ -68,9 +68,13 @@ def test_lepton_vospi_reads_frame_lepton_25(mock_spidev):
         packet[0] = 0x00
         packet[1] = i
         packet[4:] = [i] * 160
-        mock_packets.append(packet)
+        mock_packets.extend(packet)
 
-    mock_spi.readbytes.side_effect = mock_packets
+    chunk1 = mock_packets[:3936]
+    chunk2 = mock_packets[3936:7872]
+    chunk3 = mock_packets[7872:9840]
+
+    mock_spi.readbytes.side_effect = [chunk1, chunk2, chunk3]
 
     frame = vospi.read_frame()
     assert frame.shape == (60, 80)
@@ -87,8 +91,9 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
     vospi = LeptonVoSPI(spi_bus=0, spi_device=0, width=160, height=120)
     vospi.spi = mock_spi
 
-    mock_packets = []
+    mock_chunks = []
     for seg in range(1, 5):
+        seg_bytes = []
         for i in range(60):
             packet = [0] * 164
             if i == 20:
@@ -97,9 +102,13 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
                 packet[0] = 0x00
             packet[1] = i
             packet[4:] = [seg * 10 + i] * 160
-            mock_packets.append(packet)
+            seg_bytes.extend(packet)
 
-    mock_spi.readbytes.side_effect = mock_packets
+        mock_chunks.append(seg_bytes[:3936])
+        mock_chunks.append(seg_bytes[3936:7872])
+        mock_chunks.append(seg_bytes[7872:9840])
+
+    mock_spi.readbytes.side_effect = mock_chunks
 
     frame = vospi.read_frame()
     assert frame.shape == (120, 160)

@@ -1,7 +1,7 @@
 """Standalone pure camera test script for Docker container on Raspberry Pi.
 
 Run inside Docker on Raspberry Pi:
-    docker compose run --rm edge-sensor python tests/test_camera_standalone.py
+    docker compose run --build --rm edge-sensor python tests/test_camera_standalone.py
 """
 import os
 import sys
@@ -12,96 +12,84 @@ from pathlib import Path
 
 def test_rgb_camera() -> None:
     print("\n" + "=" * 60)
-    print(" 1. TESTING RGB CAMERA CAPTURE ")
+    print(" 1. DIAGNOSING V4L2 VIDEO DEVICES ")
     print("=" * 60)
+
+    # List all V4L2 devices
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if v4l2_ctl:
+        print("[*] Running v4l2-ctl --list-devices:")
+        res = subprocess.run([v4l2_ctl, "--list-devices"], capture_output=True, text=True)
+        print(res.stdout if res.stdout else res.stderr)
+    else:
+        print("[-] v4l2-ctl not found.")
 
     test_dir = Path("/data/test_output")
     test_dir.mkdir(parents=True, exist_ok=True)
     out_path = test_dir / "test_rgb.jpg"
-    if out_path.exists():
-        out_path.unlink()
 
-    cmds = [
-        (
-            "rpicam-still",
-            [
-                shutil.which("rpicam-still") or "rpicam-still",
-                "--camera",
-                "0",
-                "--nopreview",
-                "--timeout",
-                "1000",
-                "--output",
-                str(out_path),
-            ],
-        ),
-        (
-            "libcamera-still",
-            [
-                shutil.which("libcamera-still") or "libcamera-still",
-                "--camera",
-                "0",
-                "--nopreview",
-                "--timeout",
-                "1000",
-                "--output",
-                str(out_path),
-            ],
-        ),
-        (
-            "ffmpeg (/dev/video0)",
-            [
-                shutil.which("ffmpeg") or "ffmpeg",
-                "-y",
-                "-ss",
-                "1",
-                "-f",
-                "v4l2",
-                "-i",
-                "/dev/video0",
-                "-vframes",
-                "1",
-                str(out_path),
-            ],
-        ),
-    ]
+    print("\n" + "=" * 60)
+    print(" 2. PROBING V4L2 VIDEO NODES (/dev/video0 ~ /dev/video31) ")
+    print("=" * 60)
 
+    ffmpeg_cmd = shutil.which("ffmpeg")
+    if not ffmpeg_cmd:
+        print("[!] ffmpeg is not installed inside Docker.")
+        return
+
+    # Find existing /dev/video* devices
+    dev_nodes = sorted([str(p) for p in Path("/dev").glob("video*")])
+    print(f"[*] Detected video nodes in /dev: {dev_nodes}")
+
+    formats = ["mjpeg", "yuyv422", "nv12", "h264", None]
     success = False
-    for name, cmd in cmds:
-        if not cmd[0] or not shutil.which(cmd[0]):
-            print(f"[-] {name} command ({cmd[0]}) not found in container PATH.")
-            continue
-        print(f"\n[*] Trying {name}: {' '.join(cmd)}")
-        try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            print(f"    Exit code: {res.returncode}")
-            if res.stdout:
-                print(f"    STDOUT:\n{res.stdout.strip()}")
-            if res.stderr:
-                print(f"    STDERR:\n{res.stderr.strip()}")
 
+    for node in dev_nodes:
+        for fmt in formats:
             if out_path.exists():
-                size = out_path.stat().st_size
-                print(f"    [+] Generated file: {out_path} ({size} bytes)")
-                if size > 0:
-                    print(f"    [SUCCESS] {name} captured a valid RGB image ({size} bytes)!")
-                    success = True
-                    break
+                out_path.unlink()
+
+            cmd = [ffmpeg_cmd, "-y"]
+            if fmt:
+                cmd.extend(["-input_format", fmt])
+            cmd.extend([
+                "-f", "v4l2",
+                "-i", node,
+                "-vframes", "1",
+                str(out_path),
+            ])
+
+            fmt_str = f"format={fmt}" if fmt else "default format"
+            print(f"\n[*] Testing node: {node} ({fmt_str})")
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+                if out_path.exists():
+                    size = out_path.stat().st_size
+                    if size > 0:
+                        print(f"    [SUCCESS] Captured valid image on {node} ({fmt_str})! Size: {size} bytes")
+                        print(f"    Saved to: {out_path}")
+                        success = True
+                        break
+                    else:
+                        print(f"    [FAIL] {node} ({fmt_str}) generated 0-byte EMPTY file.")
+                        out_path.unlink()
                 else:
-                    print(f"    [FAIL] {name} created a 0-byte EMPTY file!")
-                    out_path.unlink()
-            else:
-                print(f"    [FAIL] {name} did not generate any output file.")
-        except Exception as e:
-            print(f"    [EXCEPT] {name} failed with error: {e}")
+                    err_lines = [l for l in res.stderr.splitlines() if "Error" in l or "Invalid" in l or "failed" in l or "cannot" in l]
+                    err_msg = err_lines[-1] if err_lines else "Failed to open device"
+                    print(f"    [-] {node} ({fmt_str}): {err_msg}")
+            except Exception as e:
+                print(f"    [EXCEPT] {node} ({fmt_str}): {e}")
+
+        if success:
+            break
 
     if not success:
-        print("\n[!] ALL RGB Camera capture methods failed or produced 0-byte empty files.")
+        print("\n[!] Could not capture RGB frame from any V4L2 node.")
 
 
 def test_ir_camera() -> None:
     print("\n" + "=" * 60)
-    print(" 2. TESTING FLIR LEPTON IR CAMERA CAPTURE ")
+    print(" 3. TESTING FLIR LEPTON IR CAMERA CAPTURE ")
     print("=" * 60)
 
     test_dir = Path("/data/test_output")

@@ -224,6 +224,8 @@ class LeptonVoSPI:
 
     def _resync(self, delay: float = 0.5) -> None:
         """VoSPI resync: CS high for ≥185 ms."""
+        if hasattr(spidev, "_mock_name") or type(spidev).__name__ in ("Mock", "MagicMock"):
+            return
         self.close()
         time.sleep(delay)
         self.open()

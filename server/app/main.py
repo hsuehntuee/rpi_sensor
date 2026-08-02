@@ -89,7 +89,7 @@ def upload_image(
     image: Annotated[UploadFile, File()],
 ) -> ImageResult:
     if timestamp.tzinfo is None:
-        raise HTTPException(422, "timestamp must include a timezone")
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
     existing = session.scalar(
         select(CameraLog).where(
             CameraLog.device_id == device_id,

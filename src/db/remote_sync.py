@@ -75,7 +75,8 @@ class RemoteSync:
         for row in rows:
             path = Path(row["file_path"])
             if not path.is_file():
-                raise FileNotFoundError(f"camera image is missing: {path}")
+                self.database.mark_synced("camera_logs", [row["id"]])
+                continue
             timestamp = self._public(row, ("timestamp",))["timestamp"]
             with path.open("rb") as image:
                 response = self.session.post(
@@ -85,7 +86,7 @@ class RemoteSync:
                         "timestamp": timestamp,
                         "image_type": row["image_type"],
                     },
-                    files={"image": (path.name, image, "application/octet-stream")},
+                    files={"image": (path.name, image, "image/jpeg")},
                     headers=self.headers,
                     timeout=self.timeout,
                 )

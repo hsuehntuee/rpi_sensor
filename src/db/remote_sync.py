@@ -79,10 +79,12 @@ class RemoteSync:
         timeout = max(self.timeout, 30.0)
         for row in rows:
             path = Path(row["file_path"])
-            if not path.is_file():
+            if not path.is_file() or path.stat().st_size == 0:
+                LOGGER.warning("Camera image missing or 0-byte empty file at %s, skipping", path)
                 self.database.mark_synced("camera_logs", [row["id"]])
                 continue
             timestamp = self._public(row, ("timestamp",))["timestamp"]
+            LOGGER.info("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
             with path.open("rb") as image:
                 response = self.session.post(
                     self.image_endpoint,
@@ -98,6 +100,7 @@ class RemoteSync:
             response.raise_for_status()
             self.database.mark_synced("camera_logs", [row["id"]])
             synced += 1
+            LOGGER.info("[RemoteSync] Successfully synced image: %s", path.name)
         return synced
 
     def sync_all(self) -> int:

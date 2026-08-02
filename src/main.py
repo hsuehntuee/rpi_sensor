@@ -353,6 +353,10 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+
+    # Execute initial sync immediately on startup
+    guarded("initial_sync", sync_task)()
+
     scheduler.start()
 
 

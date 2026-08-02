@@ -50,6 +50,7 @@ def test_unknown_part_number_accepts_explicit_dimensions():
     assert (model.width, model.height) == (320, 240)
 
 
+from itertools import cycle
 from unittest.mock import Mock, patch
 from src.sensors.camera_ir import LeptonVoSPI
 
@@ -74,7 +75,7 @@ def test_lepton_vospi_reads_frame_lepton_25(mock_spidev):
     chunk2 = mock_packets[3936:7872]
     chunk3 = mock_packets[7872:9840]
 
-    mock_spi.readbytes.side_effect = [chunk1, chunk2, chunk3] * 20
+    mock_spi.readbytes.side_effect = cycle([chunk1, chunk2, chunk3])
 
     frame = vospi.read_frame()
     assert frame.shape == (60, 80)
@@ -108,7 +109,7 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
         mock_chunks.append(seg_bytes[3936:7872])
         mock_chunks.append(seg_bytes[7872:9840])
 
-    mock_spi.readbytes.side_effect = mock_chunks * 20
+    mock_spi.readbytes.side_effect = cycle(mock_chunks)
 
     frame = vospi.read_frame()
     assert frame.shape == (120, 160)

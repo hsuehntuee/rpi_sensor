@@ -39,9 +39,9 @@ class RemoteSync:
             )
         return result
 
-    def sync_metrics(self) -> int:
-        env_rows = self.database.unsynced("env_metrics")
-        hvac_rows = self.database.unsynced("hvac_status")
+    def sync_metrics(self, batch_limit: int = 150) -> int:
+        env_rows = self.database.unsynced("env_metrics", limit=batch_limit)
+        hvac_rows = self.database.unsynced("hvac_status", limit=batch_limit)
         if not env_rows and not hvac_rows:
             return 0
         payload = {
@@ -58,11 +58,12 @@ class RemoteSync:
                 for row in hvac_rows
             ],
         }
+        timeout = max(self.timeout, 30.0)
         response = self.session.post(
             self.endpoint,
             json=payload,
             headers=self.headers,
-            timeout=self.timeout,
+            timeout=timeout,
         )
         response.raise_for_status()
         self.database.mark_synced("env_metrics", [row["id"] for row in env_rows])
@@ -70,8 +71,9 @@ class RemoteSync:
         return len(env_rows) + len(hvac_rows)
 
     def sync_images(self) -> int:
-        rows = self.database.unsynced("camera_logs", limit=100)
+        rows = self.database.unsynced("camera_logs", limit=50)
         synced = 0
+        timeout = max(self.timeout, 30.0)
         for row in rows:
             path = Path(row["file_path"])
             if not path.is_file():
@@ -88,7 +90,7 @@ class RemoteSync:
                     },
                     files={"image": (path.name, image, "image/jpeg")},
                     headers=self.headers,
-                    timeout=self.timeout,
+                    timeout=timeout,
                 )
             response.raise_for_status()
             self.database.mark_synced("camera_logs", [row["id"]])

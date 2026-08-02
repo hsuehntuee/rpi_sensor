@@ -11,6 +11,8 @@ RUN apt-get update \
        libgpiod2 \
        gcc \
        python3-dev \
+       ffmpeg \
+       v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
 

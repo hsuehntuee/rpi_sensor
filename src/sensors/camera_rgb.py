@@ -43,10 +43,68 @@ class PiCamera(RGBCamera):
         super().__init__(image_dir, self._capture)
 
     def _capture(self, path: Path) -> None:
-        cmd = shutil.which("rpicam-still") or shutil.which("libcamera-still") or "rpicam-still"
+        cmd = shutil.which("rpicam-still") or shutil.which("libcamera-still")
+        if cmd:
+            try:
+                self.runner(
+                    [
+                        cmd,
+                        "--camera",
+                        str(self.camera_index),
+                        "--nopreview",
+                        "--immediate",
+                        "--output",
+                        str(path),
+                    ],
+                    check=True,
+                    timeout=30,
+                )
+                return
+            except Exception:
+                pass
+
+        ffmpeg_cmd = shutil.which("ffmpeg")
+        video_dev = f"/dev/video{self.camera_index}"
+        if ffmpeg_cmd and Path(video_dev).exists():
+            try:
+                self.runner(
+                    [
+                        ffmpeg_cmd,
+                        "-y",
+                        "-f",
+                        "v4l2",
+                        "-i",
+                        video_dev,
+                        "-vframes",
+                        "1",
+                        str(path),
+                    ],
+                    check=True,
+                    timeout=15,
+                )
+                return
+            except Exception:
+                pass
+
+        v4l2_cmd = shutil.which("v4l2-ctl")
+        if v4l2_cmd and Path(video_dev).exists():
+            self.runner(
+                [
+                    v4l2_cmd,
+                    f"--device={video_dev}",
+                    "--stream-mmap",
+                    "--stream-count=1",
+                    f"--stream-to={path}",
+                ],
+                check=True,
+                timeout=15,
+            )
+            return
+
+        # Default attempt for rpicam-still to preserve test runner expectations
         self.runner(
             [
-                cmd,
+                "rpicam-still",
                 "--camera",
                 str(self.camera_index),
                 "--nopreview",

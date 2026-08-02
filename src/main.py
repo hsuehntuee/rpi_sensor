@@ -340,8 +340,11 @@ def main() -> None:
     )
 
     def sync_task() -> None:
-        count = sync.sync_all()
-        LOGGER.info("RemoteSync executed: %d items synced to %s", count, settings.server_url)
+        try:
+            count = sync.sync_all()
+            LOGGER.info("RemoteSync executed: %d items synced to %s", count, settings.server_url)
+        except Exception as exc:
+            LOGGER.warning("RemoteSync encountered sync error: %s (queued for next interval)", exc)
 
     scheduler = build_scheduler(
         settings,

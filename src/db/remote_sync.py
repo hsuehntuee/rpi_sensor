@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Any
 
 import requests
 
 from .local_sqlite import LocalDatabase
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RemoteSync:

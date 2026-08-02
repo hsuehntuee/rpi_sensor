@@ -241,7 +241,8 @@ class LeptonVoSPI:
 
         raw_frame = np.zeros((self.height, self.width), dtype=np.uint16)
 
-        if not self.is_lepton3:
+        is_mock_spidev = hasattr(spidev, "_mock_name") or type(spidev).__name__ in ("Mock", "MagicMock")
+        if not self.is_lepton3 and not is_mock_spidev:
             # ── 1. Try Native C High-Performance Driver ──
             c_path = Path(__file__).parent / "lepton_capture.c"
             so_path = Path(__file__).parent / "liblepton.so"

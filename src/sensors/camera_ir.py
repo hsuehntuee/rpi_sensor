@@ -139,8 +139,14 @@ class LeptonCCI:
                 )
             _, (family, width, height) = matched
             return LeptonModel(part_number, family, width, height)
-        except LeptonDetectionError:
-            raise
+        except LeptonDetectionError as error:
+            if fallback_width is not None and fallback_height is not None:
+                return LeptonModel(
+                    "UNKNOWN", "Unknown Lepton (fallback)", fallback_width, fallback_height
+                )
+            if "LEPTON_WIDTH" in str(error):
+                raise
+            raise LeptonDetectionError("Lepton CCI probe failed and no fallback dimensions set") from error
         except Exception as exc:
             if fallback_width is not None and fallback_height is not None:
                 return LeptonModel(
@@ -158,10 +164,17 @@ def probe_lepton(
 ) -> LeptonModel:
     from smbus2 import SMBus
 
-    with SMBus(bus_number) as bus:
-        return LeptonCCI(SMBusLeptonTransport(bus, address)).detect_model(
-            fallback_width, fallback_height
-        )
+    try:
+        with SMBus(bus_number) as bus:
+            return LeptonCCI(SMBusLeptonTransport(bus, address)).detect_model(
+                fallback_width, fallback_height
+            )
+    except Exception:
+        if fallback_width is not None and fallback_height is not None:
+            return LeptonModel(
+                "UNKNOWN", "Unknown Lepton (fallback)", fallback_width, fallback_height
+            )
+        raise
 
 
 try:

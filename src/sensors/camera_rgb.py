@@ -64,29 +64,36 @@ class PiCamera(RGBCamera):
                 pass
 
         ffmpeg_cmd = shutil.which("ffmpeg")
-        video_dev = f"/dev/video{self.camera_index}"
-        if ffmpeg_cmd and Path(video_dev).exists():
-            try:
-                self.runner(
-                    [
-                        ffmpeg_cmd,
-                        "-y",
-                        "-f",
-                        "v4l2",
-                        "-i",
-                        video_dev,
-                        "-vframes",
-                        "1",
-                        str(path),
-                    ],
-                    check=True,
-                    timeout=15,
-                )
-                return
-            except Exception:
-                pass
+        if ffmpeg_cmd:
+            video_devices = [f"/dev/video{self.camera_index}"] + [
+                f"/dev/video{v}" for v in range(10) if v != self.camera_index
+            ]
+            for video_dev in video_devices:
+                if Path(video_dev).exists():
+                    try:
+                        self.runner(
+                            [
+                                ffmpeg_cmd,
+                                "-y",
+                                "-f",
+                                "v4l2",
+                                "-i",
+                                video_dev,
+                                "-vframes",
+                                "1",
+                                str(path),
+                            ],
+                            check=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=10,
+                        )
+                        return
+                    except Exception:
+                        pass
 
         v4l2_cmd = shutil.which("v4l2-ctl")
+        video_dev = f"/dev/video{self.camera_index}"
         if v4l2_cmd and Path(video_dev).exists():
             self.runner(
                 [

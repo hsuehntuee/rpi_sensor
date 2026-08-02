@@ -188,6 +188,7 @@ def build_scheduler(
         id="sync",
         max_instances=1,
         coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
     )
     return scheduler
 
@@ -333,11 +334,15 @@ def main() -> None:
         ir_camera=ir_camera,
     )
 
+    def sync_task() -> None:
+        count = sync.sync_all()
+        LOGGER.info("RemoteSync executed: %d items synced to %s", count, settings.server_url)
+
     scheduler = build_scheduler(
         settings,
         sensor_task=sensor_task,
         camera_task=camera_task,
-        sync_task=sync.sync_all,
+        sync_task=sync_task,
     )
     stop_once = threading.Event()
 

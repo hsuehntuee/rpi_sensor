@@ -216,7 +216,23 @@ def main() -> None:
         from adafruit_blinka.microcontroller.generic_linux.i2c import I2C as BlinkaI2C
         from src.sensors.scd41 import SCD41Sensor
 
-        i2c_bus = BlinkaI2C(bus_num=settings.scd41_i2c_bus)
+        class SCD41I2CAdapter:
+            def __init__(self, bus_num: int) -> None:
+                self._bus = BlinkaI2C(bus_num)
+
+            def try_lock(self) -> bool:
+                return True
+
+            def unlock(self) -> None:
+                pass
+
+            def readfrom_into(self, address: int, buffer: bytearray, *, start: int = 0, end: int | None = None) -> None:
+                self._bus.readfrom_into(address, buffer, start=start, end=end)
+
+            def writeto(self, address: int, buffer: bytes | bytearray, *, start: int = 0, end: int | None = None, stop: bool = True) -> None:
+                self._bus.writeto(address, buffer, start=start, end=end, stop=stop)
+
+        i2c_bus = SCD41I2CAdapter(bus_num=settings.scd41_i2c_bus)
         driver = adafruit_scd4x.SCD4X(i2c_bus)
         scd41_sensor = SCD41Sensor(driver)
         LOGGER.info("Successfully initialized SCD41 hardware sensor on I2C bus %d", settings.scd41_i2c_bus)

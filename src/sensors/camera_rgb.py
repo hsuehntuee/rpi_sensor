@@ -6,6 +6,9 @@ import subprocess
 from typing import Any, Callable
 
 
+import shutil
+
+
 class RGBCamera:
     def __init__(
         self,
@@ -27,7 +30,7 @@ class RGBCamera:
 
 
 class PiCamera(RGBCamera):
-    """Raspberry Pi Camera adapter using the supported rpicam-still command."""
+    """Raspberry Pi Camera adapter using the supported rpicam-still or libcamera-still command."""
 
     def __init__(
         self,
@@ -40,9 +43,10 @@ class PiCamera(RGBCamera):
         super().__init__(image_dir, self._capture)
 
     def _capture(self, path: Path) -> None:
+        cmd = shutil.which("rpicam-still") or shutil.which("libcamera-still") or "rpicam-still"
         self.runner(
             [
-                "rpicam-still",
+                cmd,
                 "--camera",
                 str(self.camera_index),
                 "--nopreview",

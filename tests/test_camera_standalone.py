@@ -135,56 +135,15 @@ def test_rgb_camera() -> None:
 
 def test_ir_camera() -> None:
     print("\n" + "=" * 60)
-    print(" 3. TESTING FLIR LEPTON IR CAMERA CAPTURE ")
+    print(" 3. RUNNING GOLDEN SOURCE verify_ir.py FOR FLIR LEPTON ")
     print("=" * 60)
 
-    test_dir = Path("/data/test_output")
-    test_dir.mkdir(parents=True, exist_ok=True)
-    out_path = test_dir / "test_ir.jpg"
-    if out_path.exists():
-        out_path.unlink()
-
     try:
-        from tests.verify_ir import (
-            VoSPIReader,
-            try_capture,
-            render_fixed_range_frame,
-            raw_to_celsius,
-        )
-        from PIL import Image
-
-        print("[*] Opening SPI bus 0, device 0...")
-        reader = VoSPIReader(bus=0, device=0)
-        print("[*] Capturing frame from FLIR Lepton via VoSPI engine...")
-        raw_frame = try_capture(reader, max_attempts=1500)
-        reader.close()
-
-        if raw_frame is None:
-            print("[FAIL] VoSPI engine returned None frame.")
-            return
-
-        print(
-            f"[+] Raw frame shape: {raw_frame.shape}, min raw: {raw_frame.min()}, max raw: {raw_frame.max()}"
-        )
-        clean_frame = raw_frame & 0x3FFF
-        celsius = raw_to_celsius(clean_frame, is_tlinear=True)
-        print(f"[+] Measured Temp range: {celsius.min():.2f}°C to {celsius.max():.2f}°C")
-
-        rgb = render_fixed_range_frame(
-            celsius, min_temp=18.0, max_temp=36.0, colormap="ironbow"
-        )
-        img = Image.fromarray(rgb, mode="RGB")
-        img.save(out_path, format="JPEG", quality=90)
-
-        if out_path.exists():
-            size = out_path.stat().st_size
-            print(f"    [+] Generated file: {out_path} ({size} bytes)")
-            if size > 0:
-                print(f"    [SUCCESS] FLIR Lepton captured a valid thermal IR image ({size} bytes)!")
-            else:
-                print(f"    [FAIL] FLIR Lepton created a 0-byte EMPTY file!")
+        from tests.verify_ir import main as verify_ir_main
+        print("[*] Directly executing tests/verify_ir.py golden engine...")
+        verify_ir_main()
     except Exception as e:
-        print(f"[EXCEPT] FLIR Lepton test failed with error: {e}")
+        print(f"[EXCEPT] FLIR Lepton verify_ir.py failed: {e}")
         import traceback
         traceback.print_exc()
 

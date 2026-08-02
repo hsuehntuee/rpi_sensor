@@ -6,6 +6,8 @@ services:
     env_file: .env
     volumes:
       - ./data:/data
+      - /dev:/dev
+      - /run/udev:/run/udev
     devices:
       - /dev/i2c-1:/dev/i2c-1
       - /dev/i2c-2:/dev/i2c-2

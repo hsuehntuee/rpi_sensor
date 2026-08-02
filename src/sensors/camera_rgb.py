@@ -57,6 +57,8 @@ class PiCamera(RGBCamera):
                         str(path),
                     ],
                     check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     timeout=30,
                 )
                 return
@@ -95,18 +97,23 @@ class PiCamera(RGBCamera):
         v4l2_cmd = shutil.which("v4l2-ctl")
         video_dev = f"/dev/video{self.camera_index}"
         if v4l2_cmd and Path(video_dev).exists():
-            self.runner(
-                [
-                    v4l2_cmd,
-                    f"--device={video_dev}",
-                    "--stream-mmap",
-                    "--stream-count=1",
-                    f"--stream-to={path}",
-                ],
-                check=True,
-                timeout=15,
-            )
-            return
+            try:
+                self.runner(
+                    [
+                        v4l2_cmd,
+                        f"--device={video_dev}",
+                        "--stream-mmap",
+                        "--stream-count=1",
+                        f"--stream-to={path}",
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+                return
+            except Exception:
+                pass
 
         # Default attempt for rpicam-still to preserve test runner expectations
         self.runner(

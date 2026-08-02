@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+from datetime import datetime, timezone
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -188,7 +189,6 @@ def build_scheduler(
         id="sync",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
     )
     return scheduler
 

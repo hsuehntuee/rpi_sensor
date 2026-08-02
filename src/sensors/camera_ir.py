@@ -472,45 +472,57 @@ class PiIRCamera(RGBCamera):
     def _capture(self, path: Path) -> None:
         if np is None or Image is None:
             raise ImportError("numpy and Pillow are required for PiIRCamera")
+
+        # ── Directly use verify_ir.py execution engine ──
         try:
-            self.vospi.open()
-            raw_frame = self.vospi.read_frame()
+            from tests.verify_ir import VoSPIReader, try_capture
+            verify_reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device)
+            raw_frame = try_capture(verify_reader, max_attempts=1500)
+            verify_reader.close()
+        except Exception:
+            raw_frame = None
 
-            clean_frame = raw_frame & 0x3FFF
+        if raw_frame is None:
+            # Fallback to internal reader
+            try:
+                self.vospi.open()
+                raw_frame = self.vospi.read_frame()
+            finally:
+                self.vospi.close()
 
-            # Percentile dynamic range scaling (5% to 95%) - matching verify_ir.py
-            p_min = np.percentile(clean_frame, 5)
-            p_max = np.percentile(clean_frame, 95)
-            if p_max > p_min:
-                clipped = np.clip(clean_frame, p_min, p_max)
-                scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
-            else:
-                scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
+        clean_frame = raw_frame & 0x3FFF
 
-            # Horizontal flip matching verify_ir.py
-            scaled = np.fliplr(scaled)
+        # Percentile dynamic range scaling (5% to 95%) - matching verify_ir.py
+        p_min = np.percentile(clean_frame, 5)
+        p_max = np.percentile(clean_frame, 95)
+        if p_max > p_min:
+            clipped = np.clip(clean_frame, p_min, p_max)
+            scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
+        else:
+            scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
-            # De-striping 3x3 median filter matching verify_ir.py
-            rows, cols = scaled.shape
-            destriped = scaled.copy()
-            for r in range(1, rows - 1):
-                for c in range(1, cols - 1):
-                    destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
+        # Horizontal flip matching verify_ir.py
+        scaled = np.fliplr(scaled)
 
-            if self.colormap in ("gray", "whitehot"):
-                img = Image.fromarray(destriped, mode="L")
-            else:
-                rgb_array = apply_thermal_colormap(destriped, colormap=self.colormap)
-                img = Image.fromarray(rgb_array, mode="RGB")
+        # De-striping 3x3 median filter matching verify_ir.py
+        rows, cols = scaled.shape
+        destriped = scaled.copy()
+        for r in range(1, rows - 1):
+            for c in range(1, cols - 1):
+                destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
 
-            if self.upscale_factor > 1:
-                new_w = self.vospi.width * self.upscale_factor
-                new_h = self.vospi.height * self.upscale_factor
-                img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+        if self.colormap in ("gray", "whitehot"):
+            img = Image.fromarray(destriped, mode="L")
+        else:
+            rgb_array = apply_thermal_colormap(destriped, colormap=self.colormap)
+            img = Image.fromarray(rgb_array, mode="RGB")
 
-            img.save(path, format="JPEG", quality=95)
-        finally:
-            self.vospi.close()
+        if self.upscale_factor > 1:
+            new_w = self.vospi.width * self.upscale_factor
+            new_h = self.vospi.height * self.upscale_factor
+            img = img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+
+        img.save(path, format="JPEG", quality=95)
 
 
 class IRCamera(RGBCamera):

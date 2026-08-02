@@ -98,4 +98,8 @@ class RemoteSync:
         return synced
 
     def sync_all(self) -> int:
-        return self.sync_metrics() + self.sync_images()
+        try:
+            return self.sync_metrics(batch_limit=50) + self.sync_images()
+        except Exception as exc:
+            LOGGER.warning("RemoteSync network timeout or error: %s (queued in SQLite for next interval)", exc)
+            return 0

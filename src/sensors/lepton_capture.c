@@ -19,8 +19,7 @@
 
 /**
  * 100% Reliable Native C VoSPI capture for FLIR Lepton 2.x on RPi5.
- * Reads 120 packets (19680 bytes) in a single atomic SPI_IOC_MESSAGE(5) transaction
- * while keeping CS LOW across chunks, then scans for contiguous Packet 0..59.
+ * Scans byte-by-byte (idx++) to find Packet 0 regardless of byte-offset alignment.
  */
 int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* out_frame, int max_attempts) {
     uint8_t mode = SPI_MODE_3;
@@ -73,8 +72,8 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
             continue;
         }
 
-        // Scan raw_buf for Packet 0 at any valid packet boundary
-        for (int idx = 0; idx <= TOTAL_BYTES - FRAME_BYTES; idx += PACKET_BYTES) {
+        // Byte-by-byte scan (idx++) to locate Packet 0 regardless of stream offset
+        for (int idx = 0; idx <= TOTAL_BYTES - FRAME_BYTES; idx++) {
             uint8_t b0 = raw_buf[idx];
             uint8_t b1 = raw_buf[idx + 1];
 

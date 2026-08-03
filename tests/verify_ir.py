@@ -379,14 +379,14 @@ def main() -> None:
 
     # ── Step 3: Attempt to capture valid frame ──
     print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 3 seconds)...")
-    frame = try_capture(reader, max_attempts=1500)
+    frame = try_capture(reader, max_attempts=60000)
 
     if frame is None:
         print("  [Auto-Recovery] First capture timed out. Sending CCI SYS Reboot (0x0242) to hardware...")
         send_lepton_reboot_command(1, 0x2A)
         resync(reader, 0.5)
         print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
-        frame = try_capture(reader, max_attempts=1500)
+        frame = try_capture(reader, max_attempts=60000)
 
     reader.close()
 

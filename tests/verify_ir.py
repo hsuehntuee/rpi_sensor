@@ -164,50 +164,71 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 20000) -> np.ndarray | None:
+def try_capture(reader: VoSPIReader, max_attempts: int = 60000) -> np.ndarray | None:
     """Capture a thermal frame by reading one VoSPI packet at a time.
 
-    This is the pylepton golden algorithm: read 164 bytes, check header,
-    accumulate valid rows until all 60 are collected.
+    Accumulates valid packets across frames - never resets on resync.
+    At 10MHz SPI, 164 bytes/read ≈ 131µs → 60000 reads ≈ 7.9 seconds.
     """
     reader.open()
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
 
+    # Diagnostic counters
+    n_discard = 0
+    n_valid = 0
+    n_out_of_range = 0
+    n_duplicate = 0
+
     for attempt in range(1, max_attempts + 1):
         pkt = reader.read_packet()
         b0 = pkt[0]
         b1 = pkt[1]
 
-        # Discard packet
+        # Discard packet (b0 lower nibble = 0x0F)
         if (b0 & 0x0F) == 0x0F:
             discard_streak += 1
-            if discard_streak > 1000:
+            n_discard += 1
+            # Resync after long discard streak (FFC or desync)
+            # but do NOT reset collected packets
+            if discard_streak > 2000:
+                print(f"  [VoSPI] Resync at attempt {attempt} (discard_streak={discard_streak}), keeping {collected}/60 packets")
                 resync(reader, 0.2)
                 discard_streak = 0
-                packets = [None] * ROWS
-                collected = 0
             continue
 
         discard_streak = 0
         pkt_num = b1
 
         if pkt_num >= ROWS:
+            n_out_of_range += 1
             continue
+
+        n_valid += 1
 
         if packets[pkt_num] is None:
             payload = bytes(pkt[4:])
             packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
             collected += 1
 
-            if attempt <= 5 or (attempt % 2000 == 0):
-                print(f"  [VoSPI] Attempt {attempt}: Got Packet {pkt_num}, collected={collected}/60, "
-                      f"pixel_mean={packets[pkt_num].mean():.0f}")
+            print(f"  [VoSPI] Attempt {attempt}: Got Packet {pkt_num}, collected={collected}/60, "
+                  f"pixel_mean={packets[pkt_num].mean():.0f}, b0=0x{b0:02X}")
 
             if collected == ROWS:
-                print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
+                print(f"  [VoSPI Engine] SUCCESS at attempt {attempt}! "
+                      f"(discards={n_discard}, valid={n_valid}, oor={n_out_of_range}, dup={n_duplicate})")
                 return np.array(packets, dtype=np.uint16)
+        else:
+            n_duplicate += 1
+
+        # Periodic diagnostics
+        if attempt % 5000 == 0:
+            missing = [i for i in range(ROWS) if packets[i] is None]
+            print(f"  [VoSPI Diag] Attempt {attempt}: collected={collected}/60, "
+                  f"discards={n_discard}, valid={n_valid}, oor={n_out_of_range}, dup={n_duplicate}")
+            if missing:
+                print(f"  [VoSPI Diag] Missing packets: {missing[:20]}{'...' if len(missing) > 20 else ''}")
 
     return None
 

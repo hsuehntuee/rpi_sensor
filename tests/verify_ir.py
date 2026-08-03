@@ -188,15 +188,19 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
 
             pkt_num = b1
             if pkt_num < ROWS:
+                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                pixels = np.frombuffer(payload, dtype=">u2")
+
+                # Filter out SPI idle noise / zero bytes (real thermal pixels are ~8000)
+                if pixels.mean() < 500:
+                    continue
+
                 if packets[pkt_num] is None:
-                    if pkt_num == 0:
-                        print(f"  [FULL PACKET 0 DUMP] (164 bytes): {list(raw_bytes[offset : offset + 164])}")
-                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                    packets[pkt_num] = pixels
                     collected += 1
 
                     if collected == ROWS:
-                        print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
+                        print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 real thermal packets collected!")
                         return np.array(packets, dtype=np.uint16)
 
         if attempt == 1 or attempt % 100 == 0:

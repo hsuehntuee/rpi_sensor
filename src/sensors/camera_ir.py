@@ -573,9 +573,15 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
 
             pkt_num = b1
             if pkt_num < ROWS:
+                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                pixels = np.frombuffer(payload, dtype=">u2")
+
+                # Filter out SPI idle noise / zero bytes (real thermal pixels are ~8000)
+                if pixels.mean() < 500:
+                    continue
+
                 if packets[pkt_num] is None:
-                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                    packets[pkt_num] = pixels
                     collected += 1
 
                     if collected == ROWS:

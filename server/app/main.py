@@ -104,7 +104,6 @@ def upload_image(
 
     settings = get_settings()
     storage = settings.image_storage_path / device_id
-    storage.mkdir(parents=True, exist_ok=True)
     suffix = Path(image.filename or "").suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".tiff", ".tif"}:
         suffix = ".bin"
@@ -112,6 +111,7 @@ def upload_image(
     temporary_path = final_path.with_suffix(final_path.suffix + ".part")
     size = 0
     try:
+        storage.mkdir(parents=True, exist_ok=True)
         with temporary_path.open("xb") as output:
             while chunk := image.file.read(1024 * 1024):
                 size += len(chunk)
@@ -132,9 +132,22 @@ def upload_image(
         session.add(row)
         session.commit()
         session.refresh(row)
-    except Exception:
+    except HTTPException:
+        session.rollback()
+        raise
+    except PermissionError as exc:
+        session.rollback()
+        import logging
+        logging.getLogger(__name__).error("PermissionError writing to %s: %s", storage, exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Server storage permission denied on {storage}: {exc}. Please run 'sudo chmod -R 777 storage' on server host.",
+        )
+    except Exception as exc:
         session.rollback()
         temporary_path.unlink(missing_ok=True)
         final_path.unlink(missing_ok=True)
-        raise
+        import logging
+        logging.getLogger(__name__).exception("Failed to process image upload: %s", exc)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Image upload failed: {exc}")
     return ImageResult(id=row.id, stored=True, file_path=row.file_path)

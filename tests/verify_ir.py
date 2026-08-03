@@ -97,8 +97,8 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        self._tx24 = [0] * (24 * PACKET_BYTES)
-        self._tx12 = [0] * (12 * PACKET_BYTES)
+        self._tx24 = bytearray(24 * PACKET_BYTES)
+        self._tx12 = bytearray(12 * PACKET_BYTES)
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -175,7 +175,12 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
 
     for attempt in range(1, max_attempts + 1):
         raw_bytes = reader.read_frame_bytes()
-        n_packets = len(raw_bytes) // PACKET_BYTES
+        n_bytes = len(raw_bytes)
+        if attempt == 1 or attempt == 300:
+            print(f"  [SPI Debug] Attempt {attempt}: len(raw_bytes)={n_bytes}")
+            if n_bytes > 0:
+                print(f"  [SPI Debug] First 8 bytes: {[hex(b) for b in raw_bytes[:8]]}")
+        n_packets = n_bytes // PACKET_BYTES
 
         for i in range(n_packets):
             offset = i * PACKET_BYTES

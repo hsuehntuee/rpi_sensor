@@ -84,10 +84,12 @@ def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool
 
 
 class VoSPIReader:
-    """Chunked VoSPI reader for FLIR Lepton on RPi5.
+    """Single-packet VoSPI reader for FLIR Lepton on RPi5.
 
-    Chunked into 3 transfers (3936B, 3936B, 1968B) to stay under Linux kernel bufsiz limit.
-    This guarantees all 60 packets (9,840 bytes) are read per attempt with ZERO kernel truncation.
+    Reads exactly ONE packet (164 bytes) per xfer2 call.
+    This is the ONLY reliable method because spidev CS goes HIGH between
+    separate xfer2 calls, causing byte-offset misalignment when reading
+    multi-packet chunks.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -97,8 +99,7 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        self._tx24 = bytearray(24 * PACKET_BYTES)
-        self._tx12 = bytearray(12 * PACKET_BYTES)
+        self._tx_pkt = [0] * PACKET_BYTES  # 164 bytes dummy TX for one packet
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -111,12 +112,9 @@ class VoSPIReader:
             self.spi.close()
             self.spi = None
 
-    def read_frame_bytes(self) -> list[int]:
-        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) under 4096 limit."""
-        r1 = self.spi.xfer2(self._tx24)
-        r2 = self.spi.xfer2(self._tx24)
-        r3 = self.spi.xfer2(self._tx12)
-        return r1 + r2 + r3
+    def read_packet(self) -> list[int]:
+        """Read exactly one VoSPI packet (164 bytes)."""
+        return self.spi.xfer2(self._tx_pkt)
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
@@ -166,52 +164,50 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean thermal frame using pylepton golden accumulator."""
+def try_capture(reader: VoSPIReader, max_attempts: int = 20000) -> np.ndarray | None:
+    """Capture a thermal frame by reading one VoSPI packet at a time.
+
+    This is the pylepton golden algorithm: read 164 bytes, check header,
+    accumulate valid rows until all 60 are collected.
+    """
     reader.open()
     packets = [None] * ROWS
     collected = 0
+    discard_streak = 0
 
     for attempt in range(1, max_attempts + 1):
-        raw_bytes = reader.read_frame_bytes()
-        if not raw_bytes:
+        pkt = reader.read_packet()
+        b0 = pkt[0]
+        b1 = pkt[1]
+
+        # Discard packet
+        if (b0 & 0x0F) == 0x0F:
+            discard_streak += 1
+            if discard_streak > 1000:
+                resync(reader, 0.2)
+                discard_streak = 0
+                packets = [None] * ROWS
+                collected = 0
             continue
-        n_packets = len(raw_bytes) // PACKET_BYTES
 
-        for i in range(n_packets):
-            offset = i * PACKET_BYTES
-            b0 = raw_bytes[offset]
-            b1 = raw_bytes[offset + 1]
+        discard_streak = 0
+        pkt_num = b1
 
-            if (b0 & 0x0F) == 0x0F:
-                continue
+        if pkt_num >= ROWS:
+            continue
 
-            pkt_num = b1
-            if pkt_num < ROWS:
-                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                pixels = np.frombuffer(payload, dtype=">u2")
+        if packets[pkt_num] is None:
+            payload = bytes(pkt[4:])
+            packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+            collected += 1
 
-                # Filter out SPI idle noise / zero bytes (real thermal pixels are ~8000)
-                if pixels.mean() < 500:
-                    continue
+            if attempt <= 5 or (attempt % 2000 == 0):
+                print(f"  [VoSPI] Attempt {attempt}: Got Packet {pkt_num}, collected={collected}/60, "
+                      f"pixel_mean={packets[pkt_num].mean():.0f}")
 
-                if packets[pkt_num] is None:
-                    packets[pkt_num] = pixels
-                    collected += 1
-
-                    if collected == ROWS:
-                        print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 real thermal packets collected!")
-                        return np.array(packets, dtype=np.uint16)
-
-        if attempt == 1 or attempt % 100 == 0:
-            sample_b0 = raw_bytes[0] if len(raw_bytes) > 0 else 0
-            sample_b1 = raw_bytes[1] if len(raw_bytes) > 1 else 0
-            print(f"  [VoSPI Diag] Attempt {attempt}: collected={collected}/60, sample_b0=0x{sample_b0:02X}, sample_b1={sample_b1}")
-
-        if attempt % 150 == 0:
-            resync(reader, 0.2)
-            packets = [None] * ROWS
-            collected = 0
+            if collected == ROWS:
+                print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
+                return np.array(packets, dtype=np.uint16)
 
     return None
 

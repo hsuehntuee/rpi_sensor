@@ -243,14 +243,11 @@ class LeptonVoSPI:
         time.sleep(delay)
         self.open()
 
-    def _read_frame_bytes(self) -> list[int]:
-        """Perform 3 readbytes transfers (3936B, 3936B, 1968B) under 4096 limit."""
-        r1 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
-        r2 = self.spi.readbytes(24 * self.PACKET_BYTES)  # 3936 bytes
-        r3 = self.spi.readbytes(12 * self.PACKET_BYTES)  # 1968 bytes
-        return r1 + r2 + r3
+    def _read_packet(self) -> list[int]:
+        """Read exactly one VoSPI packet (164 bytes)."""
+        return self.spi.xfer2([0] * self.PACKET_BYTES)
 
-    def read_frame(self, max_retries: int = 1500) -> np.ndarray:
+    def read_frame(self, max_retries: int = 20000) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
 
@@ -259,37 +256,7 @@ class LeptonVoSPI:
         is_mock_spidev = hasattr(spidev, "_mock_name") or type(spidev).__name__ in ("Mock", "MagicMock")
 
         if not self.is_lepton3:
-            # ── 1. Try Native C High-Performance Driver ──
-            if not is_mock_spidev:
-                c_path = Path(__file__).parent / "lepton_capture.c"
-                so_path = Path(__file__).parent / "liblepton.so"
-                if c_path.exists():
-                    try:
-                        if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
-                            import subprocess
-                            subprocess.run(
-                                ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
-                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                            )
-                        import ctypes
-                        lib = ctypes.CDLL(str(so_path))
-                        lib.capture_lepton_frame.argtypes = [
-                            ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
-                        ]
-                        lib.capture_lepton_frame.restype = ctypes.c_int
-
-                        frame_buf = (ctypes.c_uint16 * (self.width * self.height))()
-                        dev_path = f"/dev/spidev{self.spi_bus}.{self.spi_device}".encode("utf-8")
-                        self.close()
-
-                        attempts = lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, max_retries)
-                        if attempts > 0:
-                            arr = np.ctypeslib.as_array(frame_buf).reshape((self.height, self.width)).copy()
-                            return arr
-                    except Exception:
-                        pass
-
-            # ── 2. Fallback Python Reader ──
+            # ── Single-packet VoSPI reader for Lepton 2.x ──
             if self.spi is None:
                 self.open()
 
@@ -297,40 +264,35 @@ class LeptonVoSPI:
             collected = 0
             discard_streak = 0
 
-            for attempt in range(max_retries):
-                raw_bytes = self._read_frame_bytes()
-                n_packets = len(raw_bytes) // self.PACKET_BYTES
+            for attempt in range(1, max_retries + 1):
+                pkt = self._read_packet()
+                b0 = pkt[0]
+                b1 = pkt[1]
 
-                for i in range(n_packets):
-                    offset = i * self.PACKET_BYTES
-                    b0 = raw_bytes[offset]
-                    b1 = raw_bytes[offset + 1]
+                if (b0 & 0x0F) == 0x0F:
+                    discard_streak += 1
+                    if discard_streak > 1000:
+                        self._resync(0.2)
+                        discard_streak = 0
+                        packets = [None] * self.height
+                        collected = 0
+                    continue
 
-                    if (b0 & 0x0F) == 0x0F or b1 >= self.height:
-                        discard_streak += 1
-                        continue
+                discard_streak = 0
+                pkt_num = b1
 
-                    pkt_num = b1
-                    discard_streak = 0
+                if pkt_num >= self.height:
+                    continue
 
-                    if pkt_num < self.height:
-                        if pkt_num == 0 and collected < self.height:
-                            packets = [None] * self.height
-                            collected = 0
+                if packets[pkt_num] is None:
+                    payload = bytes(pkt[4:])
+                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                    collected += 1
 
-                        if packets[pkt_num] is None:
-                            payload = bytes(raw_bytes[offset + 4 : offset + self.PACKET_BYTES])
-                            packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
-                            collected += 1
-
-                            if collected == self.height:
-                                for r in range(self.height):
-                                    raw_frame[r, :] = packets[r]
-                                return raw_frame
-
-                if discard_streak > 500:
-                    self._resync(0.5)
-                    discard_streak = 0
+                    if collected == self.height:
+                        for r in range(self.height):
+                            raw_frame[r, :] = packets[r]
+                        return raw_frame
 
             raise RuntimeError("Timed out waiting for Lepton 2.x frame")
 
@@ -483,7 +445,7 @@ def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool
 
 
 class VoSPIReader:
-    """Chunked VoSPI reader for FLIR Lepton matching verify_ir.py on RPi5."""
+    """Single-packet VoSPI reader for FLIR Lepton on RPi5."""
 
     PACKET_BYTES = 164
 
@@ -493,8 +455,7 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        self._tx24 = [0] * (24 * self.PACKET_BYTES)
-        self._tx12 = [0] * (12 * self.PACKET_BYTES)
+        self._tx_pkt = [0] * self.PACKET_BYTES
 
     def open(self):
         if spidev is not None:
@@ -508,11 +469,9 @@ class VoSPIReader:
             self.spi.close()
             self.spi = None
 
-    def read_frame_bytes(self) -> list[int]:
-        r1 = self.spi.xfer2(self._tx24)
-        r2 = self.spi.xfer2(self._tx24)
-        r3 = self.spi.xfer2(self._tx12)
-        return r1 + r2 + r3
+    def read_packet(self) -> list[int]:
+        """Read exactly one VoSPI packet (164 bytes)."""
+        return self.spi.xfer2(self._tx_pkt)
 
 
 def resync_reader(reader: VoSPIReader, delay: float = 0.5):
@@ -546,10 +505,9 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a thermal frame matching verify_ir.py golden implementation."""
+def try_capture(reader: VoSPIReader, max_attempts: int = 20000) -> np.ndarray | None:
+    """Capture a thermal frame by reading one VoSPI packet at a time."""
     ROWS = 60
-    COLS = 80
     PACKET_BYTES = 164
 
     reader.open()
@@ -558,39 +516,32 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
     discard_streak = 0
 
     for attempt in range(1, max_attempts + 1):
-        raw_bytes = reader.read_frame_bytes()
-        if not raw_bytes:
+        pkt = reader.read_packet()
+        b0 = pkt[0]
+        b1 = pkt[1]
+
+        if (b0 & 0x0F) == 0x0F:
+            discard_streak += 1
+            if discard_streak > 1000:
+                resync_reader(reader, 0.2)
+                discard_streak = 0
+                packets = [None] * ROWS
+                collected = 0
             continue
-        n_packets = len(raw_bytes) // PACKET_BYTES
 
-        for i in range(n_packets):
-            offset = i * PACKET_BYTES
-            b0 = raw_bytes[offset]
-            b1 = raw_bytes[offset + 1]
+        discard_streak = 0
+        pkt_num = b1
 
-            if (b0 & 0x0F) == 0x0F:
-                continue
+        if pkt_num >= ROWS:
+            continue
 
-            pkt_num = b1
-            if pkt_num < ROWS:
-                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                pixels = np.frombuffer(payload, dtype=">u2")
+        if packets[pkt_num] is None:
+            payload = bytes(pkt[4:])
+            packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+            collected += 1
 
-                # Filter out SPI idle noise / zero bytes (real thermal pixels are ~8000)
-                if pixels.mean() < 500:
-                    continue
-
-                if packets[pkt_num] is None:
-                    packets[pkt_num] = pixels
-                    collected += 1
-
-                    if collected == ROWS:
-                        return np.array(packets, dtype=np.uint16)
-
-        if attempt % 150 == 0:
-            resync_reader(reader, 0.2)
-            packets = [None] * ROWS
-            collected = 0
+            if collected == ROWS:
+                return np.array(packets, dtype=np.uint16)
 
     return None
 

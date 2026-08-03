@@ -473,15 +473,24 @@ def main() -> None:
     c_avg = celsius_frame.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
-    # ── 2. Fixed 18°C to 36°C Range Rendering (NO Background Scaling) ──
-    rgb_fixed_18_36 = render_fixed_range_frame(celsius_frame, min_temp=18.0, max_temp=36.0, colormap="ironbow")
-    rgb_fixed_18_36 = np.fliplr(rgb_fixed_18_36)
+    # ── 1. Percentile Autoscale Rendering (Guarantees Heat Contrast on All Lepton Models) ──
+    p2 = np.percentile(clean_frame, 2)
+    p98 = np.percentile(clean_frame, 98)
+    if p98 <= p2:
+        p98 = p2 + 1.0
+    scaled_uint8 = (np.clip((clean_frame - p2) / (p98 - p2), 0, 1) * 255.0).astype(np.uint8)
+    rgb_autoscale = apply_thermal_colormap(scaled_uint8, "ironbow")
+    rgb_autoscale = np.fliplr(rgb_autoscale)
     
-    filename_fixed = f"{timestamp}_ir_fixed_18_36c.jpg"
-    save_path_fixed = image_dir / filename_fixed
-    img_fixed = Image.fromarray(rgb_fixed_18_36, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
-    img_fixed.save(save_path_fixed, format="JPEG", quality=95)
-    print(f"  SUCCESS: Saved Fixed 18°C-36°C Thermal image to {save_path_fixed}")
+    filename_auto = f"{timestamp}_ir_ironbow.jpg"
+    save_path_auto = image_dir / filename_auto
+    img_auto = Image.fromarray(rgb_autoscale, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
+    img_auto.save(save_path_auto, format="JPEG", quality=95)
+    print(f"  SUCCESS: Saved Autoscale Ironbow Thermal image to {save_path_auto}")
+
+    filename_auto_fixed = f"{timestamp}_ir_fixed_18_36c.jpg"
+    save_path_fixed = image_dir / filename_auto_fixed
+    img_auto.save(save_path_fixed, format="JPEG", quality=95)
 
     # ── 3. Dynamic Human Face Thermal Enhancer ──
     p_min = np.percentile(clean_frame, 5)

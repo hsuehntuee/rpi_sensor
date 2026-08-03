@@ -403,6 +403,9 @@ def main() -> None:
     
     # ── 1. Absolute Temperature Conversion (°C) ──
     clean_frame = frame & 0x3FFF
+    print(f"\n  [RAW SPI DIAG] Frame min={clean_frame.min()}, max={clean_frame.max()}, mean={clean_frame.mean():.1f}")
+    print(f"  [RAW SPI DIAG] Row 0 first 10 pixels: {clean_frame[0, :10].tolist()}")
+    print(f"  [RAW SPI DIAG] Row 30 middle 10 pixels: {clean_frame[30, 35:45].tolist()}")
     celsius_frame = raw_to_celsius(clean_frame, is_tlinear=True)
     c_min = celsius_frame.min()
     c_max = celsius_frame.max()

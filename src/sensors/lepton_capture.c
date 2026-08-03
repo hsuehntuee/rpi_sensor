@@ -16,18 +16,18 @@
 
 /**
  * 100% Reliable Native C VoSPI capture for FLIR Lepton 2.x on RPi5.
- * Reads continuous 180-packet buffer in C kernel space and scans for Packet 0..59.
+ * Uses pylepton packet accumulator strategy to collect all 60 packets (0..59).
  */
 int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* out_frame, int max_attempts) {
     uint8_t mode = SPI_MODE_3;
     uint8_t bits = 8;
 
-    // 1. VoSPI Hardware State Machine Reset (CS HIGH for 200ms)
+    // 1. Hardware CS-HIGH reset pause
     int init_fd = open(spidev_path, O_RDWR);
     if (init_fd >= 0) {
         close(init_fd);
     }
-    usleep(200000);
+    usleep(200000); // 200ms CS HIGH hardware reset (>185ms required by FLIR spec)
 
     int fd = open(spidev_path, O_RDWR);
     if (fd < 0) {
@@ -48,6 +48,9 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         return -3;
     }
 
+    uint8_t row_filled[LEPTON_ROWS];
+    memset(row_filled, 0, sizeof(row_filled));
+    int collected = 0;
     int success_attempt = 0;
 
     for (int attempt = 1; attempt <= max_attempts; attempt++) {
@@ -64,38 +67,37 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
             fflush(stdout);
         }
 
-        if (nread < FRAME_BYTES) {
-            usleep(5000);
-            continue;
-        }
+        int n_packets = nread / PACKET_BYTES;
+        for (int i = 0; i < n_packets; i++) {
+            int off = i * PACKET_BYTES;
+            uint8_t b0 = raw_buf[off];
+            uint8_t b1 = raw_buf[off + 1];
 
-        // Scan raw_buf for Packet 0 at any packet boundary
-        for (int idx = 0; idx <= nread - FRAME_BYTES; idx += PACKET_BYTES) {
-            uint8_t b0 = raw_buf[idx];
-            uint8_t b1 = raw_buf[idx + 1];
+            // Ignore discard packet
+            if ((b0 & 0x0F) == 0x0F) continue;
+            if (b1 >= LEPTON_ROWS) continue;
 
-            if ((b0 & 0x0F) != 0x0F && b1 == 0) {
-                int valid = 1;
-                for (int r = 0; r < LEPTON_ROWS; r++) {
-                    int off = idx + r * PACKET_BYTES;
-                    uint8_t pb0 = raw_buf[off];
-                    uint8_t pb1 = raw_buf[off + 1];
+            uint8_t pkt_num = b1;
 
-                    if ((pb0 & 0x0F) == 0x0F || pb1 != r) {
-                        valid = 0;
-                        break;
-                    }
+            // When Packet 0 arrives and current frame is incomplete, reset accumulator
+            if (pkt_num == 0 && collected < LEPTON_ROWS) {
+                memset(row_filled, 0, sizeof(row_filled));
+                collected = 0;
+            }
+
+            if (!row_filled[pkt_num]) {
+                row_filled[pkt_num] = 1;
+                collected++;
+
+                // Copy 160-byte payload into destination frame
+                int data_off = off + 4;
+                for (int c = 0; c < LEPTON_COLS; c++) {
+                    uint8_t high = raw_buf[data_off + c * 2];
+                    uint8_t low  = raw_buf[data_off + c * 2 + 1];
+                    out_frame[pkt_num * LEPTON_COLS + c] = ((uint16_t)high << 8) | low;
                 }
 
-                if (valid) {
-                    for (int r = 0; r < LEPTON_ROWS; r++) {
-                        int off = idx + r * PACKET_BYTES + 4;
-                        for (int c = 0; c < LEPTON_COLS; c++) {
-                            uint8_t high = raw_buf[off + c * 2];
-                            uint8_t low  = raw_buf[off + c * 2 + 1];
-                            out_frame[r * LEPTON_COLS + c] = ((uint16_t)high << 8) | low;
-                        }
-                    }
+                if (collected == LEPTON_ROWS) {
                     success_attempt = attempt;
                     break;
                 }
@@ -107,12 +109,14 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         // Periodic 200ms CS-HIGH hardware resync if Lepton enters VoSPI desync
         if (attempt % 10 == 0) {
             close(fd);
-            usleep(200000);
+            usleep(200000); // 200ms CS HIGH resync
             fd = open(spidev_path, O_RDWR);
             if (fd < 0) break;
             ioctl(fd, SPI_IOC_WR_MODE, &mode);
             ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
             ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed_hz);
+            memset(row_filled, 0, sizeof(row_filled));
+            collected = 0;
         } else {
             usleep(1000);
         }

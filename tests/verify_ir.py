@@ -189,6 +189,8 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             pkt_num = b1
             if pkt_num < ROWS:
                 if packets[pkt_num] is None:
+                    if pkt_num == 0:
+                        print(f"  [FULL PACKET 0 DUMP] (164 bytes): {list(raw_bytes[offset : offset + 164])}")
                     payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
                     packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
                     collected += 1

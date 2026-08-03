@@ -528,11 +528,11 @@ def compile_and_load_native_c():
 
     if c_path.exists():
         try:
-            if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
-                subprocess.run(
-                    ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
-                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
+            so_path.unlink(missing_ok=True)
+            subprocess.run(
+                ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
             lib = ctypes.CDLL(str(so_path))
             lib.capture_lepton_frame.argtypes = [
                 ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int

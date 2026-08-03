@@ -135,6 +135,7 @@ def compile_and_load_native_c():
         
     if c_path.exists():
         try:
+            so_path.unlink(missing_ok=True)
             subprocess.run(
                 ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE

@@ -11,19 +11,23 @@
 #define LEPTON_COLS 80
 #define PACKET_BYTES 164
 #define FRAME_BYTES (LEPTON_ROWS * PACKET_BYTES)
-
-#define CHUNK_PACKETS 24
-#define CHUNK_BYTES (CHUNK_PACKETS * PACKET_BYTES) // 3936 bytes (< 4096 kernel limit)
-#define NUM_CHUNKS 5
-#define TOTAL_BYTES (NUM_CHUNKS * CHUNK_BYTES)      // 19680 bytes (120 packets)
+#define BUFFER_PACKETS 180
+#define BUFFER_BYTES (BUFFER_PACKETS * PACKET_BYTES)
 
 /**
  * 100% Reliable Native C VoSPI capture for FLIR Lepton 2.x on RPi5.
- * Scans byte-by-byte (idx++) to find Packet 0 regardless of byte-offset alignment.
+ * Reads continuous 180-packet buffer in C kernel space and scans for Packet 0..59.
  */
 int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* out_frame, int max_attempts) {
     uint8_t mode = SPI_MODE_3;
     uint8_t bits = 8;
+
+    // 1. VoSPI Hardware State Machine Reset (CS HIGH for 200ms)
+    int init_fd = open(spidev_path, O_RDWR);
+    if (init_fd >= 0) {
+        close(init_fd);
+    }
+    usleep(200000);
 
     int fd = open(spidev_path, O_RDWR);
     if (fd < 0) {
@@ -38,42 +42,35 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         return -2;
     }
 
-    uint8_t* raw_buf = (uint8_t*)malloc(TOTAL_BYTES);
+    uint8_t* raw_buf = (uint8_t*)malloc(BUFFER_BYTES);
     if (!raw_buf) {
         close(fd);
         return -3;
     }
 
-    struct spi_ioc_transfer xfer[NUM_CHUNKS];
     int success_attempt = 0;
 
     for (int attempt = 1; attempt <= max_attempts; attempt++) {
-        memset(xfer, 0, sizeof(xfer));
-
-        for (int c = 0; c < NUM_CHUNKS; c++) {
-            xfer[c].rx_buf = (uintptr_t)(raw_buf + c * CHUNK_BYTES);
-            xfer[c].len = CHUNK_BYTES;
-            xfer[c].speed_hz = speed_hz;
-            xfer[c].bits_per_word = bits;
-            xfer[c].cs_change = (c == NUM_CHUNKS - 1) ? 1 : 0;
+        int nread = 0;
+        while (nread < BUFFER_BYTES) {
+            int r = read(fd, raw_buf + nread, BUFFER_BYTES - nread);
+            if (r <= 0) break;
+            nread += r;
         }
 
-        int status = ioctl(fd, SPI_IOC_MESSAGE(NUM_CHUNKS), xfer);
         if (attempt == 1 || attempt % 300 == 0) {
-            printf("  [Native C Diag] Attempt %d: status=%d, bytes=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                   attempt, status, raw_buf[0], raw_buf[1], raw_buf[2], raw_buf[3], raw_buf[4], raw_buf[5], raw_buf[6], raw_buf[7]);
+            printf("  [Native C Diag] Attempt %d: nread=%d, bytes=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   attempt, nread, raw_buf[0], raw_buf[1], raw_buf[2], raw_buf[3], raw_buf[4], raw_buf[5], raw_buf[6], raw_buf[7]);
             fflush(stdout);
-            if (status < 0) {
-                perror("  [Native C Diag] ioctl SPI_IOC_MESSAGE error");
-            }
         }
-        if (status < 0) {
+
+        if (nread < FRAME_BYTES) {
             usleep(5000);
             continue;
         }
 
-        // Byte-by-byte scan (idx++) to locate Packet 0 regardless of stream offset
-        for (int idx = 0; idx <= TOTAL_BYTES - FRAME_BYTES; idx++) {
+        // Scan raw_buf for Packet 0 at any packet boundary
+        for (int idx = 0; idx <= nread - FRAME_BYTES; idx += PACKET_BYTES) {
             uint8_t b0 = raw_buf[idx];
             uint8_t b1 = raw_buf[idx + 1];
 
@@ -109,13 +106,19 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
 
         // Periodic 200ms CS-HIGH hardware resync if Lepton enters VoSPI desync
         if (attempt % 10 == 0) {
+            close(fd);
             usleep(200000);
+            fd = open(spidev_path, O_RDWR);
+            if (fd < 0) break;
+            ioctl(fd, SPI_IOC_WR_MODE, &mode);
+            ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
+            ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed_hz);
         } else {
             usleep(1000);
         }
     }
 
     free(raw_buf);
-    close(fd);
+    if (fd >= 0) close(fd);
     return success_attempt;
 }

@@ -77,17 +77,29 @@ class RemoteSync:
         synced = 0
         timeout = max(self.timeout, 30.0)
         while synced < max_uploads:
-            rows = self.database.unsynced("camera_logs", limit=50)
+            rows = self.database.unsynced("camera_logs", limit=200)
             if not rows:
                 break
-            processed_in_loop = False
-            for row in rows:
+            missing_ids = [
+                row["id"] for row in rows
+                if not Path(row["file_path"]).is_file() or Path(row["file_path"]).stat().st_size == 0
+            ]
+            valid_rows = [
+                row for row in rows
+                if Path(row["file_path"]).is_file() and Path(row["file_path"]).stat().st_size > 0
+            ]
+
+            if missing_ids:
+                LOGGER.info("Clearing %d missing historical image log entries from DB...", len(missing_ids))
+                self.database.mark_synced("camera_logs", missing_ids)
+
+            if not valid_rows:
+                if not missing_ids:
+                    break
+                continue
+
+            for row in valid_rows:
                 path = Path(row["file_path"])
-                if not path.is_file() or path.stat().st_size == 0:
-                    LOGGER.warning("Camera image missing or 0-byte empty file at %s, skipping", path)
-                    self.database.mark_synced("camera_logs", [row["id"]])
-                    processed_in_loop = True
-                    continue
                 timestamp = self._public(row, ("timestamp",))["timestamp"]
                 LOGGER.info("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
                 with path.open("rb") as image:
@@ -105,11 +117,11 @@ class RemoteSync:
                 response.raise_for_status()
                 self.database.mark_synced("camera_logs", [row["id"]])
                 synced += 1
-                processed_in_loop = True
                 LOGGER.info("[RemoteSync] Successfully synced image: %s", path.name)
                 if synced >= max_uploads:
                     break
-            if not processed_in_loop:
+
+            if not valid_rows and not missing_ids:
                 break
         return synced
 

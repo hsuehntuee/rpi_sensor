@@ -473,6 +473,10 @@ class VoSPIReader:
         """Read exactly one VoSPI packet (164 bytes)."""
         return self.spi.xfer2(self._tx_pkt)
 
+    def read_raw(self) -> list[int]:
+        """Read 164 raw bytes."""
+        return self.spi.xfer2(self._tx_pkt)
+
 
 def resync_reader(reader: VoSPIReader, delay: float = 0.5):
     reader.close()
@@ -505,43 +509,48 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 20000) -> np.ndarray | None:
-    """Capture a thermal frame by reading one VoSPI packet at a time."""
+def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | None:
+    """Capture a thermal frame using self-healing dynamic byte scanner."""
     ROWS = 60
     PACKET_BYTES = 164
 
     reader.open()
+    t0 = time.time()
+    buf = bytearray()
     packets = [None] * ROWS
     collected = 0
-    discard_streak = 0
 
-    for attempt in range(1, max_attempts + 1):
-        pkt = reader.read_packet()
-        b0 = pkt[0]
-        b1 = pkt[1]
+    for _ in range(80):
+        buf.extend(reader.read_raw())
 
-        if (b0 & 0x0F) == 0x0F:
-            discard_streak += 1
-            if discard_streak > 1000:
-                resync_reader(reader, 0.2)
-                discard_streak = 0
-                packets = [None] * ROWS
-                collected = 0
-            continue
+    pos = 0
+    while time.time() - t0 < max_seconds:
+        while pos + PACKET_BYTES <= len(buf):
+            b0 = buf[pos]
+            b1 = buf[pos + 1]
 
-        discard_streak = 0
-        pkt_num = b1
+            if (b0 & 0x0F) != 0x0F and b1 < ROWS:
+                payload = bytes(buf[pos + 4 : pos + PACKET_BYTES])
+                pixels = np.frombuffer(payload, dtype=">u2")
 
-        if pkt_num >= ROWS:
-            continue
+                if pixels.mean() > 500:
+                    if packets[b1] is None:
+                        packets[b1] = pixels
+                        collected += 1
 
-        if packets[pkt_num] is None:
-            payload = bytes(pkt[4:])
-            packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
-            collected += 1
+                        if collected == ROWS:
+                            return np.array(packets, dtype=np.uint16)
 
-            if collected == ROWS:
-                return np.array(packets, dtype=np.uint16)
+                    pos += PACKET_BYTES
+                    continue
+
+            pos += 1
+
+        if pos > 10000:
+            buf = buf[pos:]
+            pos = 0
+
+        buf.extend(reader.read_raw())
 
     return None
 

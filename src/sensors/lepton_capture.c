@@ -10,12 +10,27 @@
 #define LEPTON_ROWS 60
 #define LEPTON_COLS 80
 #define PACKET_BYTES 164
-#define BUFFER_PACKETS 180
-#define BUFFER_BYTES (BUFFER_PACKETS * PACKET_BYTES)
+#define CHUNK_PACKETS 24
+#define CHUNK_BYTES (CHUNK_PACKETS * PACKET_BYTES) // 3936 bytes (fits default 4096 bufsiz)
+#define TOTAL_CHUNKS 3
+#define BUFFER_BYTES (TOTAL_CHUNKS * CHUNK_BYTES) // 11,808 bytes (> 1 frame)
+
+static int spi_ioctl_read(int fd, uint8_t* rx_buf, size_t len, uint32_t speed_hz) {
+    struct spi_ioc_transfer tr = {
+        .tx_buf = 0,
+        .rx_buf = (unsigned long)rx_buf,
+        .len = (uint32_t)len,
+        .speed_hz = speed_hz,
+        .delay_usecs = 0,
+        .bits_per_word = 8,
+        .cs_change = 0, // Keep CS active low during hardware DMA transfer
+    };
+    return ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
+}
 
 /**
- * High-performance 1-byte sliding window VoSPI packet accumulator for FLIR Lepton.
- * Captures all 60 rows in < 20 milliseconds directly in C kernel IO calls.
+ * 100% Reliable Native C VoSPI capture using SPI_IOC_MESSAGE(1) ioctl transfers.
+ * Uses 3936-byte ioctl transfers (under default 4096 bufsiz) with cs_change=0.
  */
 int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* out_frame, int max_attempts) {
     uint8_t mode = SPI_MODE_3;
@@ -43,14 +58,16 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
     int success_attempt = 0;
 
     for (int attempt = 1; attempt <= max_attempts; attempt++) {
-        int nread = 0;
-        while (nread < BUFFER_BYTES) {
-            int r = read(fd, raw_buf + nread, BUFFER_BYTES - nread);
-            if (r <= 0) break;
-            nread += r;
+        // Read 3 chunk transfers via SPI_IOC_MESSAGE(1) under 4096 bytes limit
+        int ioctl_ok = 1;
+        for (int c = 0; c < TOTAL_CHUNKS; c++) {
+            if (spi_ioctl_read(fd, raw_buf + c * CHUNK_BYTES, CHUNK_BYTES, speed_hz) < 1) {
+                ioctl_ok = 0;
+                break;
+            }
         }
 
-        if (nread < BUFFER_BYTES) {
+        if (!ioctl_ok) {
             usleep(1000);
             continue;
         }

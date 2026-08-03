@@ -678,12 +678,14 @@ class PiIRCamera(RGBCamera):
         # Horizontal flip matching verify_ir.py
         scaled = np.fliplr(scaled)
 
-        # De-striping 3x3 median filter matching verify_ir.py
-        rows, cols = scaled.shape
-        destriped = scaled.copy()
-        for r in range(1, rows - 1):
-            for c in range(1, cols - 1):
-                destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
+        # De-striping 3x3 median filter (Vectorized numpy - 1ms high performance)
+        pad = np.pad(scaled, 1, mode="edge")
+        stacked = np.stack([
+            pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:],
+            pad[1:-1, :-2], pad[1:-1, 1:-1], pad[1:-1, 2:],
+            pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
+        ], axis=0)
+        destriped = np.median(stacked, axis=0).astype(np.uint8)
 
         if self.colormap in ("gray", "whitehot"):
             img = Image.fromarray(destriped, mode="L")

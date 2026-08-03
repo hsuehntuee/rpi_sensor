@@ -451,6 +451,167 @@ def apply_thermal_colormap(scaled_uint8: np.ndarray, colormap: str = "ironbow") 
     return lut[scaled_uint8]
 
 
+def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
+    """Read Lepton status register over I2C."""
+    try:
+        from smbus2 import SMBus, i2c_msg
+        with SMBus(bus_number) as bus:
+            register = 0x0002
+            req = i2c_msg.write(address, [(register >> 8) & 0xFF, register & 0xFF])
+            resp = i2c_msg.read(address, 2)
+            bus.i2c_rdwr(req, resp)
+            raw = list(resp)
+            return (raw[0] << 8) | raw[1]
+    except Exception:
+        return None
+
+
+def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool:
+    """Send SYS software reboot command (0x0242) over CCI I2C to force BootOK=True."""
+    try:
+        from smbus2 import SMBus, i2c_msg
+        with SMBus(bus_number) as bus:
+            data_len_req = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
+            bus.i2c_rdwr(data_len_req)
+            time.sleep(0.01)
+            cmd_req = i2c_msg.write(address, [0x00, 0x04, 0x02, 0x42])
+            bus.i2c_rdwr(cmd_req)
+            time.sleep(0.5)
+            return True
+    except Exception:
+        return False
+
+
+class VoSPIReader:
+    """Chunked VoSPI reader for FLIR Lepton matching verify_ir.py on RPi5."""
+
+    PACKET_BYTES = 164
+
+    def __init__(self, spi_bus: int = 0, spi_device: int = 0, speed: int = 20_000_000, mode: int = 3):
+        self.spi_bus = spi_bus
+        self.spi_device = spi_device
+        self.speed = speed
+        self.mode = mode
+        self.spi = None
+
+    def open(self):
+        if spidev is not None:
+            self.spi = spidev.SpiDev()
+            self.spi.open(self.spi_bus, self.spi_device)
+            self.spi.max_speed_hz = self.speed
+            self.spi.mode = self.mode
+
+    def close(self):
+        if self.spi is not None:
+            self.spi.close()
+            self.spi = None
+
+    def read_frame_bytes(self) -> list[int]:
+        r1 = self.spi.readbytes(24 * self.PACKET_BYTES)
+        r2 = self.spi.readbytes(24 * self.PACKET_BYTES)
+        r3 = self.spi.readbytes(12 * self.PACKET_BYTES)
+        return r1 + r2 + r3
+
+
+def resync_reader(reader: VoSPIReader, delay: float = 0.5):
+    reader.close()
+    time.sleep(delay)
+    reader.open()
+
+
+def compile_and_load_native_c():
+    """Compile and load native C VoSPI capture shared object."""
+    import ctypes
+    import subprocess
+    c_path = Path(__file__).parent / "lepton_capture.c"
+    so_path = Path(__file__).parent / "liblepton.so"
+
+    if c_path.exists():
+        try:
+            if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
+                subprocess.run(
+                    ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+            lib = ctypes.CDLL(str(so_path))
+            lib.capture_lepton_frame.argtypes = [
+                ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
+            ]
+            lib.capture_lepton_frame.restype = ctypes.c_int
+            return lib
+        except Exception:
+            pass
+    return None
+
+
+def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
+    """Capture a thermal frame matching verify_ir.py golden implementation."""
+    import ctypes
+    ROWS = 60
+    COLS = 80
+    PACKET_BYTES = 164
+
+    # 1. Try Native C Kernel Engine
+    native_lib = compile_and_load_native_c()
+    if native_lib is not None:
+        frame_buf = (ctypes.c_uint16 * (ROWS * COLS))()
+        dev_path = f"/dev/spidev{reader.spi_bus}.{reader.spi_device}".encode("utf-8")
+        reader.close()
+        attempts = native_lib.capture_lepton_frame(dev_path, reader.speed, frame_buf, max_attempts)
+        if attempts > 0:
+            arr = np.ctypeslib.as_array(frame_buf).reshape((ROWS, COLS)).copy()
+            return arr
+
+    # 2. Fallback Python Chunked Reader
+    reader.open()
+    packets = [None] * ROWS
+    collected = 0
+    discard_streak = 0
+
+    for attempt in range(max_attempts):
+        raw_bytes = reader.read_frame_bytes()
+        n_packets = len(raw_bytes) // PACKET_BYTES
+
+        for i in range(n_packets):
+            offset = i * PACKET_BYTES
+            b0 = raw_bytes[offset]
+            b1 = raw_bytes[offset + 1]
+
+            if (b0 & 0x0F) == 0x0F or b1 >= ROWS:
+                discard_streak += 1
+                continue
+
+            pkt_num = b1
+            discard_streak = 0
+
+            if pkt_num < ROWS:
+                if pkt_num == 0 and collected < ROWS:
+                    packets = [None] * ROWS
+                    collected = 0
+
+                if packets[pkt_num] is None:
+                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                    collected += 1
+
+                    if collected == ROWS:
+                        return np.array(packets, dtype=np.uint16)
+
+        if discard_streak > 500:
+            resync_reader(reader, 0.5)
+            discard_streak = 0
+
+    return None
+
+
+def render_fixed_range_frame(celsius_frame: np.ndarray, min_temp: float = 18.0,
+                               max_temp: float = 36.0, colormap: str = "ironbow") -> np.ndarray:
+    """Render thermal image using fixed temperature range (e.g. 18°C to 36°C)."""
+    clipped = np.clip(celsius_frame, min_temp, max_temp)
+    scaled_uint8 = ((clipped - min_temp) / (max_temp - min_temp) * 255.0).astype(np.uint8)
+    return apply_thermal_colormap(scaled_uint8, colormap)
+
+
 class PiIRCamera(RGBCamera):
     """FLIR Lepton IR Camera adapter using SPI (VoSPI) and PIL/numpy to save JPEG."""
 
@@ -473,14 +634,27 @@ class PiIRCamera(RGBCamera):
         if np is None or Image is None:
             raise ImportError("numpy and Pillow are required for PiIRCamera")
 
-        # ── Directly use verify_ir.py execution engine ──
+        # 1. Probing Lepton CCI status & auto-reboot if BootOK=False (matching verify_ir.py)
+        status_reg = read_raw_status(bus_number=1, address=0x2A)
+        if status_reg is not None:
+            busy = bool(status_reg & 0x0001)
+            boot_ok = bool(status_reg & 0x0004)
+            if not boot_ok or busy:
+                send_lepton_reboot_command(bus_number=1, address=0x2A)
+                for _ in range(10):
+                    time.sleep(0.2)
+                    st = read_raw_status(bus_number=1, address=0x2A)
+                    if st is not None and bool(st & 0x0004) and not bool(st & 0x0001):
+                        break
+
+        # 2. Execute golden VoSPI capture engine (matching verify_ir.py)
+        reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device)
         try:
-            from tests.verify_ir import VoSPIReader, try_capture
-            verify_reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device)
-            raw_frame = try_capture(verify_reader, max_attempts=1500)
-            verify_reader.close()
+            raw_frame = try_capture(reader, max_attempts=1500)
         except Exception:
             raw_frame = None
+        finally:
+            reader.close()
 
         if raw_frame is None:
             # Fallback to internal reader

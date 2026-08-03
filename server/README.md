@@ -1,9 +1,37 @@
-# 遠端感測資料伺服器
+# 遠端感測資料伺服器 (Server)
 
 單機 Docker Compose 部署，包含 FastAPI API 與 PostgreSQL。PostgreSQL 不映射
 主機 port，只有 API 容器可以連線。Alembic migration 會在 API 啟動前自動套用。
 
-## 首次部署
+---
+
+## ⚡ 快速開始 (Fast Start) - 全新環境 Server 啟動
+
+在全新的伺服器環境中，執行以下 command 即可完成 100% 啟動：
+
+```bash
+# 1. 進入 server 目錄並複製環境變數設定檔
+cd server
+cp .env.example .env
+
+# 2. 編輯 .env 設定資料庫密碼與 API 密鑰 (請使用 openssl rand -hex 32 產生強密碼)
+# vim .env 或 nano .env
+
+# 3. 背景編譯並啟動容器 (PostgreSQL + FastAPI)
+# 若使用獨立 docker-compose (V1/Standalone)，請使用: docker-compose up -d --build
+docker compose up --build -d
+# 或
+docker-compose up -d --build
+
+# 4. 驗證服務啟動狀態與健康檢查
+docker compose ps
+curl http://127.0.0.1:8000/health
+# 預期回覆: {"status":"ok"}
+```
+
+---
+
+## 首次部署詳細說明
 
 ```bash
 git pull

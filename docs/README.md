@@ -101,11 +101,11 @@ CREATE TABLE camera_logs (
 ## 4. 模組說明與運作機制
 
 ### 4.1 感測器與相機驅動
-*   **SCD41 CO2 感測器 ([scd41.py](file:///c:/Users/Hsueh/Downloads/rpi_sensor/src/sensors/scd41.py))**: 
+*   **SCD41 CO2 感測器 ([scd41.py](src/sensors/scd41.py))**: 
     透過 Adafruit CircuitPython SCD4X 驅動讀取，當感測器 `data_ready` 時寫入溫濕度與 CO2。
-*   **RGB Camera ([camera_rgb.py](file:///c:/Users/Hsueh/Downloads/rpi_sensor/src/sensors/camera_rgb.py))**:
+*   **RGB Camera ([camera_rgb.py](src/sensors/camera_rgb.py))**:
     使用新版樹莓派官方支援的 `rpicam-still` 擷取影像。
-*   **FLIR Lepton IR Camera ([camera_ir.py](file:///c:/Users/Hsueh/Downloads/rpi_sensor/src/sensors/camera_ir.py))**:
+*   **FLIR Lepton IR Camera ([camera_ir.py](src/sensors/camera_ir.py))**:
     - **CCI 控制**：經由 I2C 讀取 Lepton 核心料號並自動判定解析度（如 Lepton 2.5 為 80x60，Lepton 3.5 為 160x120）。
     - **VoSPI 接收**：自實體 SPI0 連接埠以 20MHz 速度讀取 164-byte 封包。支援 Lepton 3.x 分段拼接（檢查 Packet 20 中的 Segment ID 進行影像對齊與防掉幀重置）。
     - **影像生成**：讀取出的 16-bit 熱原始數據經由 `numpy` 進行 Min-Max 歸一化，並由 `Pillow` 導出為標準 JPG 影像。
@@ -146,6 +146,7 @@ docker compose run --entrypoint "python -m pytest" edge-sensor
 使用 Docker 一鍵在背景啟動採樣：
 ```bash
 docker compose up --build -d
+# 或舊版: docker-compose up -d --build
 ```
 
 ### 5.4 觀測運作 Log

@@ -73,34 +73,44 @@ class RemoteSync:
         self.database.mark_synced("hvac_status", [row["id"] for row in hvac_rows])
         return len(env_rows) + len(hvac_rows)
 
-    def sync_images(self) -> int:
-        rows = self.database.unsynced("camera_logs", limit=50)
+    def sync_images(self, max_uploads: int = 50) -> int:
         synced = 0
         timeout = max(self.timeout, 30.0)
-        for row in rows:
-            path = Path(row["file_path"])
-            if not path.is_file() or path.stat().st_size == 0:
-                LOGGER.warning("Camera image missing or 0-byte empty file at %s, skipping", path)
+        while synced < max_uploads:
+            rows = self.database.unsynced("camera_logs", limit=50)
+            if not rows:
+                break
+            processed_in_loop = False
+            for row in rows:
+                path = Path(row["file_path"])
+                if not path.is_file() or path.stat().st_size == 0:
+                    LOGGER.warning("Camera image missing or 0-byte empty file at %s, skipping", path)
+                    self.database.mark_synced("camera_logs", [row["id"]])
+                    processed_in_loop = True
+                    continue
+                timestamp = self._public(row, ("timestamp",))["timestamp"]
+                LOGGER.info("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
+                with path.open("rb") as image:
+                    response = self.session.post(
+                        self.image_endpoint,
+                        data={
+                            "device_id": row["device_id"],
+                            "timestamp": timestamp,
+                            "image_type": row["image_type"],
+                        },
+                        files={"image": (path.name, image, "image/jpeg")},
+                        headers=self.headers,
+                        timeout=timeout,
+                    )
+                response.raise_for_status()
                 self.database.mark_synced("camera_logs", [row["id"]])
-                continue
-            timestamp = self._public(row, ("timestamp",))["timestamp"]
-            LOGGER.info("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
-            with path.open("rb") as image:
-                response = self.session.post(
-                    self.image_endpoint,
-                    data={
-                        "device_id": row["device_id"],
-                        "timestamp": timestamp,
-                        "image_type": row["image_type"],
-                    },
-                    files={"image": (path.name, image, "image/jpeg")},
-                    headers=self.headers,
-                    timeout=timeout,
-                )
-            response.raise_for_status()
-            self.database.mark_synced("camera_logs", [row["id"]])
-            synced += 1
-            LOGGER.info("[RemoteSync] Successfully synced image: %s", path.name)
+                synced += 1
+                processed_in_loop = True
+                LOGGER.info("[RemoteSync] Successfully synced image: %s", path.name)
+                if synced >= max_uploads:
+                    break
+            if not processed_in_loop:
+                break
         return synced
 
     def sync_all(self) -> int:

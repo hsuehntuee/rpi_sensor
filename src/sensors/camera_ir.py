@@ -212,7 +212,7 @@ class LeptonVoSPI:
         self.height = height
         self.rows_per_read = height if width <= 80 else 60
         self.is_lepton3 = (width * height) > 4800
-        self.spi_speed = 20_000_000   # 20 MHz (Official FLIR Lepton speed)
+        self.spi_speed = 10_000_000   # 10 MHz (Rock-solid for Raspberry Pi 5 RP1 chip)
         self.spi_mode = 3             # CPOL=1, CPHA=1
         self.spi = None
 
@@ -487,7 +487,7 @@ class VoSPIReader:
 
     PACKET_BYTES = 164
 
-    def __init__(self, spi_bus: int = 0, spi_device: int = 0, speed: int = 20_000_000, mode: int = 3):
+    def __init__(self, spi_bus: int = 0, spi_device: int = 0, speed: int = 10_000_000, mode: int = 3):
         self.spi_bus = spi_bus
         self.spi_device = spi_device
         self.speed = speed

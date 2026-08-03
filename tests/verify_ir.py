@@ -51,7 +51,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 20_000_000         # 20 MHz (FLIR Lepton Datasheet: minimum 10MHz required to prevent FIFO underflow)
+SPI_SPEED    = 10_000_000         # 10 MHz (Rock-solid for Raspberry Pi 5 RP1 chip)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 
@@ -196,6 +196,11 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     if collected == ROWS:
                         print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
                         return np.array(packets, dtype=np.uint16)
+
+        if attempt == 1 or attempt % 100 == 0:
+            sample_b0 = raw_bytes[0] if len(raw_bytes) > 0 else 0
+            sample_b1 = raw_bytes[1] if len(raw_bytes) > 1 else 0
+            print(f"  [VoSPI Diag] Attempt {attempt}: collected={collected}/60, sample_b0=0x{sample_b0:02X}, sample_b1={sample_b1}")
 
         if attempt % 150 == 0:
             resync(reader, 0.2)

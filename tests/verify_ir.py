@@ -420,7 +420,7 @@ def main() -> None:
         frame_buf = (ctypes.c_uint16 * (80 * 60))()
         dev_path = b"/dev/spidev0.0"
         reader.close()
-        attempts = c_lib.capture_lepton_frame(dev_path, 10_000_000, frame_buf, 100)
+        attempts = c_lib.capture_lepton_frame(dev_path, 10_000_000, frame_buf, 1500)
         if attempts > 0:
             print(f"  [Native C Engine] SUCCESS! Thermal frame captured in attempt #{attempts} (< 0.1s)!")
             frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
@@ -438,7 +438,7 @@ def main() -> None:
         resync(reader, 0.5)
         print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
         if c_lib is not None:
-            attempts = c_lib.capture_lepton_frame(b"/dev/spidev0.0", 10_000_000, frame_buf, 100)
+            attempts = c_lib.capture_lepton_frame(b"/dev/spidev0.0", 10_000_000, frame_buf, 1500)
             if attempts > 0:
                 frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
         if frame is None:

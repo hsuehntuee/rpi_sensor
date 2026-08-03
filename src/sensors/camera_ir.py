@@ -263,7 +263,7 @@ class LeptonVoSPI:
                     frame_buf = (ctypes.c_uint16 * (self.width * self.height))()
                     dev_path = f"/dev/spidev{self.spi_bus}.{self.spi_device}".encode("utf-8")
                     self.close()
-                    attempts = c_lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, 100)
+                    attempts = c_lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, 1500)
                     if attempts > 0:
                         return np.ctypeslib.as_array(frame_buf).reshape((self.height, self.width)).copy()
 

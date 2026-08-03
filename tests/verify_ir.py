@@ -70,6 +70,19 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
         return None
 
 
+def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool:
+    """Send CCI SYS Reboot command (0x0242) to FLIR Lepton over I2C to reset VoSPI engine."""
+    try:
+        with SMBus(bus_number) as bus:
+            cmd = 0x0242
+            req = i2c_msg.write(address, [(cmd >> 8) & 0xFF, cmd & 0xFF, 0x00, 0x00])
+            bus.i2c_rdwr(req)
+            return True
+    except Exception as exc:
+        print(f"  [Diag] CCI reboot command failed: {exc}")
+        return False
+
+
 class VoSPIReader:
     """Chunked VoSPI reader for FLIR Lepton on RPi5.
 
@@ -360,12 +373,20 @@ def main() -> None:
     resync(reader, 0.5)
 
     # ── Step 3: Attempt to capture valid frame ──
-    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 2 seconds)...")
-    frame = try_capture(reader, max_attempts=100)
+    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 3 seconds)...")
+    frame = try_capture(reader, max_attempts=1500)
+
+    if frame is None:
+        print("  [Auto-Recovery] First capture timed out. Sending CCI SYS Reboot (0x0242) to hardware...")
+        send_lepton_reboot_command(1, 0x2A)
+        resync(reader, 0.5)
+        print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
+        frame = try_capture(reader, max_attempts=1500)
+
     reader.close()
 
     if frame is None:
-        print("\n  ERROR: Could not capture a valid frame after 1500 attempts (~5s).")
+        print("\n  ERROR: Could not capture a valid frame after hardware resync & reboot.")
         print("\nSuggestions:")
         print("  - Verify /boot/firmware/config.txt has dtparam=spi=on")
         print("  - Verify there is NO dtoverlay=nospi10 in config.txt")

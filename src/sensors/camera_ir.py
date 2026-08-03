@@ -546,29 +546,16 @@ def compile_and_load_native_c():
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
     """Capture a thermal frame matching verify_ir.py golden implementation."""
-    import ctypes
     ROWS = 60
     COLS = 80
     PACKET_BYTES = 164
 
-    # 1. Try Native C Kernel Engine
-    native_lib = compile_and_load_native_c()
-    if native_lib is not None:
-        frame_buf = (ctypes.c_uint16 * (ROWS * COLS))()
-        dev_path = f"/dev/spidev{reader.spi_bus}.{reader.spi_device}".encode("utf-8")
-        reader.close()
-        attempts = native_lib.capture_lepton_frame(dev_path, reader.speed, frame_buf, max_attempts)
-        if attempts > 0:
-            arr = np.ctypeslib.as_array(frame_buf).reshape((ROWS, COLS)).copy()
-            return arr
-
-    # 2. Fallback Python Chunked Reader
     reader.open()
     packets = [None] * ROWS
     collected = 0
     discard_streak = 0
 
-    for attempt in range(max_attempts):
+    for attempt in range(1, max_attempts + 1):
         raw_bytes = reader.read_frame_bytes()
         n_packets = len(raw_bytes) // PACKET_BYTES
 
@@ -597,8 +584,8 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
                     if collected == ROWS:
                         return np.array(packets, dtype=np.uint16)
 
-        if discard_streak > 500:
-            resync_reader(reader, 0.5)
+        if discard_streak > 300:
+            resync_reader(reader, 0.2)
             discard_streak = 0
 
     return None

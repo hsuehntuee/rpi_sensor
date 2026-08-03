@@ -167,7 +167,7 @@ def compile_and_load_native_c():
 
 
 def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | None:
-    """Capture a 100% clean thermal frame using golden VoSPI chunked accumulator."""
+    """Capture a 100% clean thermal frame using VoSPI chunked accumulator."""
     reader.open()
     packets = [None] * ROWS
     collected = 0
@@ -176,10 +176,8 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
     for attempt in range(1, max_attempts + 1):
         raw_bytes = reader.read_frame_bytes()
         n_bytes = len(raw_bytes)
-        if attempt == 1 or attempt == 300:
-            print(f"  [SPI Debug] Attempt {attempt}: len(raw_bytes)={n_bytes}")
-            if n_bytes > 0:
-                print(f"  [SPI Debug] First 8 bytes: {[hex(b) for b in raw_bytes[:8]]}")
+        if n_bytes == 0:
+            continue
         n_packets = n_bytes // PACKET_BYTES
 
         for i in range(n_packets):
@@ -194,22 +192,24 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             pkt_num = b1
             discard_streak = 0
 
-            if pkt_num < ROWS:
-                if pkt_num == 0 and collected < ROWS:
-                    packets = [None] * ROWS
-                    collected = 0
+            # If Packet 0 arrives and current frame is incomplete, start fresh
+            if pkt_num == 0 and collected < ROWS:
+                packets = [None] * ROWS
+                collected = 0
 
-                if packets[pkt_num] is None:
-                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
-                    collected += 1
+            if packets[pkt_num] is None:
+                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                collected += 1
 
-                    if collected == ROWS:
-                        print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
-                        return np.array(packets, dtype=np.uint16)
+                if collected == ROWS:
+                    print(f"  [VoSPI Engine] Attempt {attempt}: SUCCESS! All 60 packets collected!")
+                    return np.array(packets, dtype=np.uint16)
 
-        if discard_streak > 300:
+        if discard_streak > 150:
             resync(reader, 0.2)
+            packets = [None] * ROWS
+            collected = 0
             discard_streak = 0
 
     return None

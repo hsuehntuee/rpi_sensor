@@ -559,7 +559,10 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
 
     for attempt in range(1, max_attempts + 1):
         raw_bytes = reader.read_frame_bytes()
-        n_packets = len(raw_bytes) // PACKET_BYTES
+        n_bytes = len(raw_bytes)
+        if n_bytes == 0:
+            continue
+        n_packets = n_bytes // PACKET_BYTES
 
         for i in range(n_packets):
             offset = i * PACKET_BYTES
@@ -573,21 +576,22 @@ def try_capture(reader: VoSPIReader, max_attempts: int = 1500) -> np.ndarray | N
             pkt_num = b1
             discard_streak = 0
 
-            if pkt_num < ROWS:
-                if pkt_num == 0 and collected < ROWS:
-                    packets = [None] * ROWS
-                    collected = 0
+            if pkt_num == 0 and collected < ROWS:
+                packets = [None] * ROWS
+                collected = 0
 
-                if packets[pkt_num] is None:
-                    payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
-                    packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
-                    collected += 1
+            if packets[pkt_num] is None:
+                payload = bytes(raw_bytes[offset + 4 : offset + PACKET_BYTES])
+                packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
+                collected += 1
 
-                    if collected == ROWS:
-                        return np.array(packets, dtype=np.uint16)
+                if collected == ROWS:
+                    return np.array(packets, dtype=np.uint16)
 
-        if discard_streak > 300:
+        if discard_streak > 150:
             resync_reader(reader, 0.2)
+            packets = [None] * ROWS
+            collected = 0
             discard_streak = 0
 
     return None

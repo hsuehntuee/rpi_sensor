@@ -359,8 +359,20 @@ def main() -> None:
             stop_once.set()
             scheduler.shutdown(wait=False)
 
+    def trigger_instant_snap(*_: object) -> None:
+        LOGGER.info("Received SIGUSR1: Instantly capturing RGB/IR photos & syncing to Server...")
+        def _run() -> None:
+            guarded("instant_camera", camera_task)()
+            guarded("instant_sync", sync_task)()
+        threading.Thread(target=_run, daemon=True).start()
+
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    if hasattr(signal, "SIGUSR1"):
+        try:
+            signal.signal(signal.SIGUSR1, trigger_instant_snap)
+        except (ValueError, OSError):
+            pass
 
     # Execute initial sync immediately on startup
     guarded("initial_sync", sync_task)()

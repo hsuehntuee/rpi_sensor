@@ -12,13 +12,43 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 LOGGER = logging.getLogger("snap_and_sync")
 
 
+import os
+import signal
+import time
+
+
+def get_daemon_pid() -> int | None:
+    # PID 1 inside Docker container is python -m src.main
+    if os.path.exists("/proc/1/cmdline"):
+        try:
+            with open("/proc/1/cmdline", "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="ignore")
+                if "src.main" in cmdline or "python" in cmdline:
+                    return 1
+        except Exception:
+            pass
+    return None
+
+
 def main() -> None:
+    print("==================================================")
+    print("📸 Triggering Instant RGB & IR Photo Capture & Sync...")
+    print("==================================================")
+
+    pid = get_daemon_pid()
+    if pid is not None and hasattr(signal, "SIGUSR1"):
+        try:
+            os.kill(pid, signal.SIGUSR1)
+            print("🚀 [Success] Sent SIGUSR1 trigger signal to running background daemon!")
+            print("⚡ The running daemon is now capturing RGB & IR photos and uploading them to Server.")
+            print("🛡️ (Zero hardware conflict - uses active camera streams)")
+            print("==================================================")
+            return
+        except Exception as exc:
+            print(f"⚠️ Could not signal daemon: {exc}. Falling back to standalone capture...")
+
     settings = load_settings()
     database = LocalDatabase(settings.database_path)
-
-    print("==================================================")
-    print("📸 Instantly Capturing RGB & IR Photos and Syncing...")
-    print("==================================================")
 
     # 1. Initialize RGB Camera
     rgb_camera = None

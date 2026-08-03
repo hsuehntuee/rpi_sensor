@@ -424,6 +424,8 @@ def main() -> None:
         if attempts > 0:
             print(f"  [Native C Engine] SUCCESS! Thermal frame captured in attempt #{attempts} (< 0.1s)!")
             frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
+        else:
+            print(f"  [Native C Engine] Result code: {attempts}")
 
     # 2. Python Fallback Scanner if C Engine unavailable
     if frame is None:

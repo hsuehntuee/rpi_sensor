@@ -6,6 +6,8 @@ services:
     env_file: .env
     volumes:
       - ./data:/data
+      - ./src:/app/src
+      - ./tests:/app/tests
       - /dev:/dev
       - /run/udev:/run/udev
     devices:

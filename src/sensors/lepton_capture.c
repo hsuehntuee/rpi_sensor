@@ -68,6 +68,10 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         }
 
         if (!ioctl_ok) {
+            if (attempt <= 3 || attempt % 20 == 0) {
+                printf("  [C Engine] Attempt %d: ioctl transfer failed\n", attempt);
+                fflush(stdout);
+            }
             usleep(1000);
             continue;
         }
@@ -100,6 +104,8 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
                         total_collected++;
 
                         if (total_collected == LEPTON_ROWS) {
+                            printf("  [C Engine] SUCCESS! Captured all 60/60 rows at attempt #%d!\n", attempt);
+                            fflush(stdout);
                             success_attempt = attempt;
                             break;
                         }
@@ -109,6 +115,11 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
                 }
             }
             pos++; // Auto-realign 1 byte
+        }
+
+        if (attempt <= 3 || attempt % 20 == 0) {
+            printf("  [C Engine] Attempt %d: total_collected=%d/60\n", attempt, total_collected);
+            fflush(stdout);
         }
 
         if (success_attempt > 0) break;

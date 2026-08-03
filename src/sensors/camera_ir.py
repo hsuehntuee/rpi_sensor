@@ -524,7 +524,7 @@ def compile_and_load_native_c():
     import ctypes
     import subprocess
     c_path = Path(__file__).parent / "lepton_capture.c"
-    so_path = Path(__file__).parent / "liblepton.so"
+    so_path = Path("/tmp/liblepton.so")
 
     if c_path.exists():
         try:

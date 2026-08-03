@@ -127,18 +127,16 @@ def dump_frame_headers(raw_bytes: list[int], label: str = ""):
 def compile_and_load_native_c():
     """Compile and load native C VoSPI capture shared object inside Docker container."""
     c_path = Path("/app/src/sensors/lepton_capture.c")
-    so_path = Path("/app/src/sensors/liblepton.so")
-    
     if not c_path.exists():
         c_path = Path("src/sensors/lepton_capture.c")
-        so_path = Path("src/sensors/liblepton.so")
-        
+    so_path = Path("/tmp/liblepton.so")
+
     if c_path.exists():
         try:
             so_path.unlink(missing_ok=True)
-            subprocess.run(
+            res = subprocess.run(
                 ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             lib = ctypes.CDLL(str(so_path))
             lib.capture_lepton_frame.argtypes = [
@@ -148,6 +146,8 @@ def compile_and_load_native_c():
             return lib
         except Exception as exc:
             print(f"  [Native C Engine] Compiler note: {exc}")
+            if hasattr(exc, "stderr") and exc.stderr:
+                print(f"  [Native C Engine] Compiler error: {exc.stderr}")
     return None
 
 

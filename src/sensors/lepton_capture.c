@@ -63,6 +63,7 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         if (attempt == 1 || attempt % 300 == 0) {
             printf("  [Native C Diag] Attempt %d: status=%d, bytes=%02X %02X %02X %02X %02X %02X %02X %02X\n",
                    attempt, status, raw_buf[0], raw_buf[1], raw_buf[2], raw_buf[3], raw_buf[4], raw_buf[5], raw_buf[6], raw_buf[7]);
+            fflush(stdout);
             if (status < 0) {
                 perror("  [Native C Diag] ioctl SPI_IOC_MESSAGE error");
             }

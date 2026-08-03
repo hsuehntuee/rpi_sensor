@@ -84,12 +84,11 @@ def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool
 
 
 class VoSPIReader:
-    """Single-packet VoSPI reader for FLIR Lepton on RPi5.
+    """Raw SPI byte stream reader for FLIR Lepton on RPi5.
 
-    Reads exactly ONE packet (164 bytes) per xfer2 call.
-    This is the ONLY reliable method because spidev CS goes HIGH between
-    separate xfer2 calls, causing byte-offset misalignment when reading
-    multi-packet chunks.
+    Reads 164 bytes per xfer2 call and accumulates into a continuous
+    byte buffer. A separate alignment step finds the true packet
+    boundaries within the stream.
     """
 
     def __init__(self, spi_bus: int = 0, spi_device: int = 0,
@@ -99,7 +98,7 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
-        self._tx_pkt = [0] * PACKET_BYTES  # 164 bytes dummy TX for one packet
+        self._tx_pkt = [0] * PACKET_BYTES  # 164 bytes dummy TX
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -112,29 +111,16 @@ class VoSPIReader:
             self.spi.close()
             self.spi = None
 
-    def read_packet(self) -> list[int]:
-        """Read exactly one VoSPI packet (164 bytes)."""
+    def read_raw(self) -> list[int]:
+        """Read 164 raw SPI bytes (may NOT be aligned to a packet boundary)."""
         return self.spi.xfer2(self._tx_pkt)
 
 
 def resync(reader: VoSPIReader, delay: float = 0.5):
-    """VoSPI resync: hold CS high for ≥185ms (using 500ms to guarantee hardware reset)."""
+    """VoSPI resync: hold CS high for ≥185ms to reset Lepton stream position."""
     reader.close()
     time.sleep(delay)
     reader.open()
-
-
-def dump_frame_headers(raw_bytes: list[int], label: str = ""):
-    """Print the first few packet headers from raw xfer2 bytes."""
-    print(f"  {label} Packet headers (first 10 of 60):")
-    for i in range(min(10, ROWS)):
-        offset = i * PACKET_BYTES
-        b0 = raw_bytes[offset]
-        b1 = raw_bytes[offset + 1]
-        is_discard = (b0 & 0x0F) == 0x0F
-        pkt_num = b1
-        print(f"    Pkt {i:02d}: Flags=0x{b0:02X}  "
-              f"(PktNum={pkt_num}, Discard={is_discard})")
 
 
 def compile_and_load_native_c():
@@ -164,73 +150,116 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_attempts: int = 60000) -> np.ndarray | None:
-    """Capture a thermal frame by reading one VoSPI packet at a time.
+def find_packet_alignment(buf: bytearray, pkt_size: int = 164, rows: int = 60) -> int:
+    """Find the byte offset where VoSPI packets are aligned in a raw SPI buffer.
 
-    Accumulates valid packets across frames - never resets on resync.
-    At 10MHz SPI, 164 bytes/read ≈ 131µs → 60000 reads ≈ 7.9 seconds.
+    Scores each candidate offset 0..163 by checking if headers at that offset
+    look like valid VoSPI headers. Sequential packet numbers get a large bonus
+    to eliminate false positives.
+
+    Returns the best-scoring byte offset.
+    """
+    n_check = min(20, (len(buf) // pkt_size) - 1)
+    if n_check < 3:
+        return 0
+
+    best_offset = 0
+    best_score = -1
+
+    for k in range(pkt_size):
+        score = 0
+        prev_valid_num = -1
+
+        for j in range(n_check):
+            pos = k + j * pkt_size
+            if pos + 1 >= len(buf):
+                break
+
+            b0 = buf[pos]
+            b1 = buf[pos + 1]
+            is_discard = (b0 & 0x0F) == 0x0F
+
+            if is_discard:
+                score += 1
+                prev_valid_num = -1
+            elif b1 < rows:
+                score += 2
+                # Big bonus for sequential packet numbers (nearly impossible by chance)
+                if prev_valid_num >= 0 and b1 == (prev_valid_num + 1) % rows:
+                    score += 5
+                prev_valid_num = b1
+            else:
+                prev_valid_num = -1
+
+        if score > best_score:
+            best_score = score
+            best_offset = k
+
+    return best_offset
+
+
+def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | None:
+    """Capture a thermal frame by streaming raw SPI bytes with auto byte-alignment.
+
+    1. Reads ~65 chunks (10,660 bytes ≈ 1 Lepton frame) to detect alignment.
+    2. Scores all 164 candidate byte offsets to find true packet boundaries.
+    3. Extracts properly aligned packets until all 60 rows are collected.
     """
     reader.open()
+    t0 = time.time()
+    buf = bytearray()
+
+    # Phase 1: Read initial data for alignment detection (~65 reads ≈ 10,660 bytes)
+    print("  [VoSPI] Phase 1: Reading SPI byte stream for alignment detection...")
+    for _ in range(65):
+        buf.extend(reader.read_raw())
+
+    # Phase 2: Find packet alignment
+    align = find_packet_alignment(buf, PACKET_BYTES, ROWS)
+    print(f"  [VoSPI] Byte alignment detected at offset {align}")
+
+    # Phase 3: Parse aligned packets
     packets = [None] * ROWS
     collected = 0
-    discard_streak = 0
+    pos = align
 
-    # Diagnostic counters
-    n_discard = 0
-    n_valid = 0
-    n_out_of_range = 0
-    n_duplicate = 0
+    while time.time() - t0 < max_seconds:
+        # Extract all available packets from buffer
+        while pos + PACKET_BYTES <= len(buf):
+            b0 = buf[pos]
+            b1 = buf[pos + 1]
 
-    for attempt in range(1, max_attempts + 1):
-        pkt = reader.read_packet()
-        b0 = pkt[0]
-        b1 = pkt[1]
+            if (b0 & 0x0F) != 0x0F and b1 < ROWS and packets[b1] is None:
+                payload = bytes(buf[pos + 4 : pos + PACKET_BYTES])
+                packets[b1] = np.frombuffer(payload, dtype=">u2")
+                collected += 1
 
-        # Discard packet (b0 lower nibble = 0x0F)
-        if (b0 & 0x0F) == 0x0F:
-            discard_streak += 1
-            n_discard += 1
-            # Resync after long discard streak (FFC or desync)
-            # but do NOT reset collected packets
-            if discard_streak > 2000:
-                print(f"  [VoSPI] Resync at attempt {attempt} (discard_streak={discard_streak}), keeping {collected}/60 packets")
-                resync(reader, 0.2)
-                discard_streak = 0
-            continue
+                if collected <= 5 or collected % 10 == 0 or collected >= 55:
+                    print(f"  [VoSPI] Packet {b1:2d} ({collected:2d}/60) "
+                          f"pixel_mean={packets[b1].mean():.0f}")
 
-        discard_streak = 0
-        pkt_num = b1
+                if collected == ROWS:
+                    elapsed = time.time() - t0
+                    print(f"  [VoSPI] SUCCESS! All 60 packets collected in {elapsed:.2f}s")
+                    return np.array(packets, dtype=np.uint16)
 
-        if pkt_num >= ROWS:
-            n_out_of_range += 1
-            continue
+            pos += PACKET_BYTES
 
-        n_valid += 1
+        # Read more raw SPI bytes
+        buf.extend(reader.read_raw())
 
-        if packets[pkt_num] is None:
-            payload = bytes(pkt[4:])
-            packets[pkt_num] = np.frombuffer(payload, dtype=">u2")
-            collected += 1
+        # Periodically trim consumed buffer to save memory
+        if pos > PACKET_BYTES * 500:
+            buf = buf[pos:]
+            pos = 0
 
-            print(f"  [VoSPI] Attempt {attempt}: Got Packet {pkt_num}, collected={collected}/60, "
-                  f"pixel_mean={packets[pkt_num].mean():.0f}, b0=0x{b0:02X}")
-
-            if collected == ROWS:
-                print(f"  [VoSPI Engine] SUCCESS at attempt {attempt}! "
-                      f"(discards={n_discard}, valid={n_valid}, oor={n_out_of_range}, dup={n_duplicate})")
-                return np.array(packets, dtype=np.uint16)
-        else:
-            n_duplicate += 1
-
-        # Periodic diagnostics
-        if attempt % 5000 == 0:
-            missing = [i for i in range(ROWS) if packets[i] is None]
-            print(f"  [VoSPI Diag] Attempt {attempt}: collected={collected}/60, "
-                  f"discards={n_discard}, valid={n_valid}, oor={n_out_of_range}, dup={n_duplicate}")
-            if missing:
-                print(f"  [VoSPI Diag] Missing packets: {missing[:20]}{'...' if len(missing) > 20 else ''}")
-
+    # Timeout - report what we collected
+    missing = [i for i in range(ROWS) if packets[i] is None]
+    print(f"  [VoSPI] Timeout after {time.time() - t0:.1f}s: collected={collected}/60")
+    if missing:
+        print(f"  [VoSPI] Missing packets: {missing}")
     return None
+
 
 
 def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool = True) -> np.ndarray:
@@ -378,15 +407,15 @@ def main() -> None:
     resync(reader, 0.5)
 
     # ── Step 3: Attempt to capture valid frame ──
-    print("\n[3/3] Attempting to capture a valid thermal frame (polling for up to 3 seconds)...")
-    frame = try_capture(reader, max_attempts=60000)
+    print("\n[3/3] Attempting to capture a valid thermal frame...")
+    frame = try_capture(reader, max_seconds=15.0)
 
     if frame is None:
         print("  [Auto-Recovery] First capture timed out. Sending CCI SYS Reboot (0x0242) to hardware...")
         send_lepton_reboot_command(1, 0x2A)
         resync(reader, 0.5)
         print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
-        frame = try_capture(reader, max_attempts=60000)
+        frame = try_capture(reader, max_seconds=15.0)
 
     reader.close()
 

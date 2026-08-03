@@ -79,10 +79,10 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
 
             // 驗證 VoSPI Header
             if ((b0 & 0x0F) != 0x0F && b1 < LEPTON_ROWS) {
-                // 驗證下一個封包標頭是否連續 (Packet N+1 或 Discard)，徹底排除 CRC 誤判導致的紅色垂直線
+                // 【超強鎖定】嚴格校驗下一個封包的號碼必須是 next_b1 == b1 + 1 (如果是第 59 行則允許下一個為 0)
                 uint8_t next_b0 = raw_buf[pos + PACKET_BYTES];
                 uint8_t next_b1 = raw_buf[pos + PACKET_BYTES + 1];
-                int is_seq = ((next_b0 & 0x0F) == 0x0F) || (next_b1 == (b1 + 1) % LEPTON_ROWS);
+                int is_seq = (b1 == 59) || ((next_b0 & 0x0F) != 0x0F && next_b1 == (b1 + 1));
 
                 if (is_seq) {
                     int data_off = pos + 4;

@@ -628,9 +628,10 @@ class PiIRCamera(RGBCamera):
 
         clean_frame = raw_frame & 0x3FFF
 
-        # Percentile dynamic range scaling (5% to 95%) - matching verify_ir.py
-        p_min = np.percentile(clean_frame, 5)
-        p_max = np.percentile(clean_frame, 95)
+        # Percentile dynamic range scaling on inner thermal payload (cols 2..78)
+        inner = clean_frame[:, 2:78]
+        p_min = np.percentile(inner, 5)
+        p_max = np.percentile(inner, 95)
         if p_max > p_min:
             clipped = np.clip(clean_frame, p_min, p_max)
             scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)

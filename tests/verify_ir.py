@@ -411,14 +411,36 @@ def main() -> None:
 
     # ── Step 3: Attempt to capture valid frame ──
     print("\n[3/3] Attempting to capture a valid thermal frame...")
-    frame = try_capture(reader, max_seconds=15.0)
+    frame = None
+
+    # 1. Try Native C High-Performance Driver for instant (< 50ms) capture
+    c_lib = compile_and_load_native_c()
+    if c_lib is not None:
+        print("  [Native C Engine] Running zero-latency C VoSPI reader...")
+        frame_buf = (ctypes.c_uint16 * (80 * 60))()
+        dev_path = b"/dev/spidev0.0"
+        reader.close()
+        attempts = c_lib.capture_lepton_frame(dev_path, 10_000_000, frame_buf, 100)
+        if attempts > 0:
+            print(f"  [Native C Engine] SUCCESS! Thermal frame captured in attempt #{attempts} (< 0.1s)!")
+            frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
+
+    # 2. Python Fallback Scanner if C Engine unavailable
+    if frame is None:
+        reader.open()
+        frame = try_capture(reader, max_seconds=15.0)
 
     if frame is None:
         print("  [Auto-Recovery] First capture timed out. Sending CCI SYS Reboot (0x0242) to hardware...")
         send_lepton_reboot_command(1, 0x2A)
         resync(reader, 0.5)
         print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
-        frame = try_capture(reader, max_seconds=15.0)
+        if c_lib is not None:
+            attempts = c_lib.capture_lepton_frame(b"/dev/spidev0.0", 10_000_000, frame_buf, 100)
+            if attempts > 0:
+                frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
+        if frame is None:
+            frame = try_capture(reader, max_seconds=15.0)
 
     reader.close()
 

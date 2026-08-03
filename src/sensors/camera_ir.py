@@ -256,7 +256,18 @@ class LeptonVoSPI:
         is_mock_spidev = hasattr(spidev, "_mock_name") or type(spidev).__name__ in ("Mock", "MagicMock")
 
         if not self.is_lepton3:
-            # ── Single-packet VoSPI reader for Lepton 2.x ──
+            # ── 1. Native C High-Performance Zero-Latency Driver ──
+            if not is_mock_spidev:
+                c_lib = compile_and_load_native_c()
+                if c_lib is not None:
+                    frame_buf = (ctypes.c_uint16 * (self.width * self.height))()
+                    dev_path = f"/dev/spidev{self.spi_bus}.{self.spi_device}".encode("utf-8")
+                    self.close()
+                    attempts = c_lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, 100)
+                    if attempts > 0:
+                        return np.ctypeslib.as_array(frame_buf).reshape((self.height, self.width)).copy()
+
+            # ── 2. Fallback Python Reader ──
             if self.spi is None:
                 self.open()
 

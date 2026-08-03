@@ -17,15 +17,39 @@ from .models import CameraLog, EnvMetric, HVACStatus
 from .schemas import ImageResult, MetricsSyncIn, SyncResult
 from .security import require_api_key
 
+from typing import Any
+from fastapi.staticfiles import StaticFiles
+
 app = FastAPI(title="Raspberry Pi Sensor Server", version="1.0.0")
 SessionDependency = Annotated[Session, Depends(get_session)]
 AuthDependency = Annotated[None, Depends(require_api_key)]
+
+# Mount static images directory for instant browser viewing
+app.mount("/static/images", StaticFiles(directory="/data/images"), name="images")
 
 
 @app.get("/health")
 def health(session: SessionDependency) -> dict[str, str]:
     session.execute(text("SELECT 1"))
     return {"status": "ok"}
+
+
+@app.get("/api/v1/images/list")
+def list_uploaded_images() -> list[dict[str, Any]]:
+    base = get_settings().image_storage_path
+    images = []
+    if base.exists():
+        for path in base.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                rel_path = path.relative_to(base).as_posix()
+                images.append({
+                    "name": path.name,
+                    "relative_path": rel_path,
+                    "url": f"/static/images/{rel_path}",
+                    "size_bytes": path.stat().st_size,
+                    "mtime": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                })
+    return sorted(images, key=lambda item: item["mtime"], reverse=True)
 
 
 @app.post("/api/v1/sync/metrics", response_model=SyncResult)

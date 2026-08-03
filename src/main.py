@@ -190,7 +190,7 @@ def build_scheduler(
     scheduler.add_job(
         guarded("sync", sync_task),
         "interval",
-        minutes=5,
+        seconds=30,
         id="sync",
         max_instances=1,
         coalesce=True,

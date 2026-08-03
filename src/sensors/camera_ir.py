@@ -493,6 +493,8 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
+        self._tx24 = [0] * (24 * self.PACKET_BYTES)
+        self._tx12 = [0] * (12 * self.PACKET_BYTES)
 
     def open(self):
         if spidev is not None:
@@ -507,9 +509,9 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        r1 = self.spi.readbytes(24 * self.PACKET_BYTES)
-        r2 = self.spi.readbytes(24 * self.PACKET_BYTES)
-        r3 = self.spi.readbytes(12 * self.PACKET_BYTES)
+        r1 = self.spi.xfer2(self._tx24)
+        r2 = self.spi.xfer2(self._tx24)
+        r3 = self.spi.xfer2(self._tx12)
         return r1 + r2 + r3
 
 

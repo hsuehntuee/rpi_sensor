@@ -97,6 +97,8 @@ class VoSPIReader:
         self.speed = speed
         self.mode = mode
         self.spi = None
+        self._tx24 = [0] * (24 * PACKET_BYTES)
+        self._tx12 = [0] * (12 * PACKET_BYTES)
 
     def open(self):
         self.spi = spidev.SpiDev()
@@ -110,10 +112,10 @@ class VoSPIReader:
             self.spi = None
 
     def read_frame_bytes(self) -> list[int]:
-        """Perform 3 readbytes transfers (3936B, 3936B, 1968B) under 4096 limit."""
-        r1 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes (24 packets)
-        r2 = self.spi.readbytes(24 * PACKET_BYTES)  # 3936 bytes (24 packets)
-        r3 = self.spi.readbytes(12 * PACKET_BYTES)  # 1968 bytes (12 packets)
+        """Perform 3 xfer2 transfers (3936B, 3936B, 1968B) under 4096 limit."""
+        r1 = self.spi.xfer2(self._tx24)
+        r2 = self.spi.xfer2(self._tx24)
+        r3 = self.spi.xfer2(self._tx12)
         return r1 + r2 + r3
 
 

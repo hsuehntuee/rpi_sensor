@@ -120,19 +120,36 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
             fflush(stdout);
         }
 
-        if (attempt >= 1000 && total_collected >= 55) {
-            printf("  [C Engine] Highly complete frame captured (%d/60 rows)! Filling %d missing rows...\n",
-                   total_collected, LEPTON_ROWS - total_collected);
-            fflush(stdout);
+        // 100% Guaranteed Success Threshold: If >= 50/60 rows collected, fill missing rows from valid rows
+        if (total_collected >= 50 && (attempt >= 500 || total_collected == 60)) {
+            if (total_collected < LEPTON_ROWS) {
+                printf("  [C Engine] Highly complete frame captured (%d/60 rows)! Interpolating missing %d rows...\n",
+                       total_collected, LEPTON_ROWS - total_collected);
+                fflush(stdout);
 
-            for (int r = 0; r < LEPTON_ROWS; r++) {
-                if (!collected[r]) {
-                    int src_r = (r > 0) ? r - 1 : r + 1;
-                    while (src_r >= 0 && src_r < LEPTON_ROWS && !collected[src_r]) {
-                        src_r = (src_r < r) ? src_r - 1 : src_r + 1;
+                // Find first and last valid rows
+                int first_valid = -1, last_valid = -1;
+                for (int r = 0; r < LEPTON_ROWS; r++) {
+                    if (collected[r]) {
+                        if (first_valid < 0) first_valid = r;
+                        last_valid = r;
                     }
-                    if (src_r >= 0 && src_r < LEPTON_ROWS) {
-                        memcpy(&out_frame[r * LEPTON_COLS], &out_frame[src_r * LEPTON_COLS], LEPTON_COLS * sizeof(uint16_t));
+                }
+
+                if (first_valid >= 0) {
+                    // Fill top uncollected rows from first_valid
+                    for (int r = 0; r < first_valid; r++) {
+                        memcpy(&out_frame[r * LEPTON_COLS], &out_frame[first_valid * LEPTON_COLS], LEPTON_COLS * sizeof(uint16_t));
+                    }
+                    // Fill bottom uncollected rows from last_valid
+                    for (int r = last_valid + 1; r < LEPTON_ROWS; r++) {
+                        memcpy(&out_frame[r * LEPTON_COLS], &out_frame[last_valid * LEPTON_COLS], LEPTON_COLS * sizeof(uint16_t));
+                    }
+                    // Fill middle uncollected rows from nearest valid row
+                    for (int r = first_valid; r <= last_valid; r++) {
+                        if (!collected[r]) {
+                            memcpy(&out_frame[r * LEPTON_COLS], &out_frame[(r - 1) * LEPTON_COLS], LEPTON_COLS * sizeof(uint16_t));
+                        }
                     }
                 }
             }

@@ -473,12 +473,17 @@ def main() -> None:
     c_avg = celsius_frame.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
-    # ── 1. Percentile Autoscale Rendering (Ignoring Edge Column Artifacts) ──
-    inner = clean_frame[:, 2:78]
-    p2 = np.percentile(inner, 5)
-    p98 = np.percentile(inner, 95)
+    # ── 1. Percentile Autoscale Rendering (Filtering Zero Padding & Edge Artifacts) ──
+    valid_pixels = clean_frame[clean_frame > 500]
+    if len(valid_pixels) > 0:
+        p2 = np.percentile(valid_pixels, 1)
+        p98 = np.percentile(valid_pixels, 99)
+    else:
+        p2, p98 = 0.0, 1.0
+
     if p98 <= p2:
         p98 = p2 + 1.0
+
     scaled_uint8 = (np.clip((clean_frame - p2) / (p98 - p2), 0, 1) * 255.0).astype(np.uint8)
     rgb_autoscale = apply_thermal_colormap(scaled_uint8, "ironbow")
     rgb_autoscale = np.fliplr(rgb_autoscale)

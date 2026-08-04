@@ -51,7 +51,7 @@ COLS         = 80
 PACKET_WORDS = COLS + 2           # 82 uint16 = 164 bytes
 PACKET_BYTES = PACKET_WORDS * 2   # 164 bytes
 FRAME_BYTES  = ROWS * PACKET_BYTES  # 9840 bytes
-SPI_SPEED    = 20_000_000         # 20 MHz (FLIR Lepton max SPI clock)
+SPI_SPEED    = 10_000_000         # 10 MHz (Rock-solid 0-bit-error clock for Raspberry Pi 5)
 SPI_MODE     = 3                  # CPOL=1, CPHA=1
 
 

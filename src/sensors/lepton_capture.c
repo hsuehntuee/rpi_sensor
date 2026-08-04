@@ -12,8 +12,8 @@
 #define PACKET_BYTES 164
 #define CHUNK_PACKETS 24
 #define CHUNK_BYTES (CHUNK_PACKETS * PACKET_BYTES) // 3936 bytes
-#define TOTAL_CHUNKS 3
-#define BUFFER_BYTES (TOTAL_CHUNKS * CHUNK_BYTES) // 11,808 bytes
+#define TOTAL_CHUNKS 4
+#define BUFFER_BYTES (TOTAL_CHUNKS * CHUNK_BYTES) // 15,744 bytes (fits > 1.5 frames)
 
 static int spi_ioctl_read_chunk(int fd, uint8_t* rx_buf, size_t len, uint32_t speed_hz) {
     struct spi_ioc_transfer tr = {

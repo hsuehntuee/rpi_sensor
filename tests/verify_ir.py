@@ -199,70 +199,54 @@ def find_packet_alignment(buf: bytearray, pkt_size: int = 164, rows: int = 60) -
 
 
 def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | None:
-    """Capture a thermal frame using a 100% self-healing dynamic byte scanner.
-
-    Instead of assuming fixed 164-byte strides (which drift due to CS toggling),
-    it scans byte-by-byte whenever an invalid header is encountered.
-    This guarantees zero packet loss and instant alignment recovery.
-    """
+    """Capture a 100% clean VoSPI frame using pylepton golden sequential packet algorithm."""
     reader.open()
     t0 = time.time()
-    buf = bytearray()
-    packets = [None] * ROWS
-    collected = 0
+    print("  [pylepton Stream Engine] Synchronizing and capturing sequential packets 0..59...")
 
-    print("  [VoSPI Engine] Starting self-healing dynamic VoSPI stream decoder...")
-
-    # Read initial batch
-    for _ in range(80):
-        buf.extend(reader.read_raw())
-
-    pos = 0
     while time.time() - t0 < max_seconds:
-        while pos + PACKET_BYTES <= len(buf):
-            b0 = buf[pos]
-            b1 = buf[pos + 1]
+        pkt = reader.read_raw()
+        if not pkt or len(pkt) < 164:
+            continue
 
-            # Check if current pos is a valid packet header
-            if (b0 & 0x0F) != 0x0F and b1 < ROWS:
-                payload = bytes(buf[pos + 4 : pos + PACKET_BYTES])
-                pixels = np.frombuffer(payload, dtype=">u2")
+        b0, b1 = pkt[0], pkt[1]
+        if (b0 & 0x0F) == 0x0F:
+            continue
 
-                # Validate thermal payload (> 500 mean ADU)
-                if pixels.mean() > 500:
-                    if packets[b1] is None:
-                        packets[b1] = pixels
-                        collected += 1
+        # Look for start of new frame (Packet 0)
+        if b1 == 0:
+            frame_packets = [None] * ROWS
+            payload = bytes(pkt[4:164])
+            frame_packets[0] = np.frombuffer(payload, dtype=">u2")
+            valid = True
 
-                        if collected <= 5 or collected % 10 == 0 or collected >= 55:
-                            print(f"  [VoSPI Stream] Got Packet {b1:2d} ({collected:2d}/60), mean={pixels.mean():.0f}")
+            for expected in range(1, ROWS):
+                p = reader.read_raw()
+                if not p or len(p) < 164:
+                    valid = False
+                    break
 
-                        if collected == ROWS:
-                            elapsed = time.time() - t0
-                            print(f"  [VoSPI Engine] SUCCESS! All 60/60 thermal packets collected in {elapsed:.2f}s!")
-                            return np.array(packets, dtype=np.uint16)
+                p0, p1 = p[0], p[1]
+                retry = 0
+                while (p0 & 0x0F) == 0x0F and retry < 10:
+                    p = reader.read_raw()
+                    if p and len(p) >= 164:
+                        p0, p1 = p[0], p[1]
+                    retry += 1
 
-                    # Valid packet consumed: advance by full 164 bytes
-                    pos += PACKET_BYTES
-                    continue
+                if (p0 & 0x0F) != 0x0F and p1 == expected:
+                    p_payload = bytes(p[4:164])
+                    frame_packets[expected] = np.frombuffer(p_payload, dtype=">u2")
+                else:
+                    valid = False
+                    break
 
-            # If not a valid header/payload, advance by 1 byte to auto-realign
-            pos += 1
+            if valid and all(fp is not None for fp in frame_packets):
+                elapsed = time.time() - t0
+                print(f"  [pylepton Stream Engine] SUCCESS! Captured 100% clean 60/60 sequential frame in {elapsed:.2f}s!")
+                return np.array(frame_packets, dtype=np.uint16)
 
-        # Trim processed buffer to save RAM
-        if pos > 10000:
-            buf = buf[pos:]
-            pos = 0
-
-        # Stream more raw SPI bytes
-        buf.extend(reader.read_raw())
-
-    missing = [i for i in range(ROWS) if packets[i] is None]
-    print(f"  [VoSPI Engine] Timeout ({time.time() - t0:.1f}s): collected {collected}/60")
-    if missing:
-        print(f"  [VoSPI Engine] Missing packets: {missing}")
     return None
-
 
 
 def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool | None = None) -> np.ndarray:

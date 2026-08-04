@@ -104,13 +104,6 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
             success_attempt = attempt;
             break;
         }
-
-        if (total_collected >= 35 && attempt >= 150) {
-            printf("  [C Engine] Captured %d/60 rows in attempt #%d. Interpolating missing rows...\n", total_collected, attempt);
-            fflush(stdout);
-            success_attempt = attempt;
-            break;
-        }
     }
 
     if (total_collected > 0) {

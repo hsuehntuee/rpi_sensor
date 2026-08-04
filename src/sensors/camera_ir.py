@@ -212,7 +212,7 @@ class LeptonVoSPI:
         self.height = height
         self.rows_per_read = height if width <= 80 else 60
         self.is_lepton3 = (width * height) > 4800
-        self.spi_speed = 10_000_000   # 10 MHz (Rock-solid for Raspberry Pi 5 RP1 chip)
+        self.spi_speed = 20_000_000   # 20 MHz (FLIR Lepton max SPI clock)
         self.spi_mode = 3             # CPOL=1, CPHA=1
         self.spi = None
 

@@ -270,16 +270,19 @@ def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool | None = None) -> np.
     
     Auto-detects TLinear mode:
     - If mean raw ADU > 20000 (TLinear Centi-Kelvin mode): Celsius = (raw / 100.0) - 273.15
-    - If mean raw ADU <= 20000 (Raw 14-bit ADU mode): Celsius = 25.0 + (raw - 8192.0) / 40.0
+    - If mean raw ADU <= 20000 (Raw 14-bit ADU mode): Celsius = 25.0 + (raw - center_adu) / 40.0
     """
     raw_float = raw_frame.astype(np.float32)
-    mean_val = float(raw_float.mean()) if raw_float.size > 0 else 0.0
+    valid_mask = (raw_float > 500) & (raw_float < 16300)
+    valid_vals = raw_float[valid_mask] if np.any(valid_mask) else raw_float
+    mean_val = float(valid_vals.mean()) if valid_vals.size > 0 else 0.0
 
     if is_tlinear is True or (is_tlinear is None and mean_val > 20000.0):
         celsius = (raw_float / 100.0) - 273.15
     else:
-        # Fallback estimation for non-TLinear raw counts (~40 LSB / °C centered at 25°C)
-        celsius = 25.0 + (raw_float - 8192.0) / 40.0
+        # Non-TLinear mode: 1 °C ≈ 40 ADU counts
+        center_adu = 8192.0 if abs(mean_val - 8192.0) < 3000 else mean_val
+        celsius = 25.0 + (raw_float - center_adu) / 40.0
     return celsius
 
 
@@ -482,9 +485,11 @@ def main() -> None:
     print(f"  [RAW SPI DIAG] Row 0 first 10 pixels: {clean_frame[0, :10].tolist()}")
     print(f"  [RAW SPI DIAG] Row 30 middle 10 pixels: {clean_frame[30, 35:45].tolist()}")
     celsius_frame = raw_to_celsius(clean_frame)
-    c_min = celsius_frame.min()
-    c_max = celsius_frame.max()
-    c_avg = celsius_frame.mean()
+    valid_mask = (clean_frame > 500) & (clean_frame < 16300)
+    celsius_valid = celsius_frame[valid_mask] if np.any(valid_mask) else celsius_frame
+    c_min = celsius_valid.min()
+    c_max = celsius_valid.max()
+    c_avg = celsius_valid.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
     # ── 1. Percentile Autoscale Rendering with Low-Variance Protection ──

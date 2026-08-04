@@ -655,6 +655,16 @@ class PiIRCamera(RGBCamera):
         clean_frame = raw_frame & 0x3FFF
         h, w = clean_frame.shape
 
+        # Auto-repair missing/dropped 0-rows by interpolating from nearest valid rows
+        row_means = clean_frame.mean(axis=1)
+        zero_rows = np.where(row_means < 500)[0]
+        if 0 < len(zero_rows) < h:
+            valid_rows = np.where(row_means >= 500)[0]
+            if len(valid_rows) > 0:
+                for r in zero_rows:
+                    nearest_row = valid_rows[np.argmin(np.abs(valid_rows - r))]
+                    clean_frame[r, :] = clean_frame[nearest_row, :]
+
         if self.fixed_temp_range is not None:
             # Mode A: 100% Fixed Absolute Temperature Range (e.g. 18°C to 36°C)
             min_temp, max_temp = self.fixed_temp_range

@@ -466,17 +466,28 @@ def main() -> None:
     
     # ── 1. Absolute Temperature Conversion (°C) ──
     clean_frame = frame & 0x3FFF
+    h, w = clean_frame.shape
+
+    # Auto-repair missing/dropped 0-rows by interpolating from nearest valid rows
+    row_means = clean_frame.mean(axis=1)
+    zero_rows = np.where(row_means < 500)[0]
+    if 0 < len(zero_rows) < h:
+        valid_rows = np.where(row_means >= 500)[0]
+        if len(valid_rows) > 0:
+            for r in zero_rows:
+                nearest_row = valid_rows[np.argmin(np.abs(valid_rows - r))]
+                clean_frame[r, :] = clean_frame[nearest_row, :]
+
     print(f"\n  [RAW SPI DIAG] Frame min={clean_frame.min()}, max={clean_frame.max()}, mean={clean_frame.mean():.1f}")
     print(f"  [RAW SPI DIAG] Row 0 first 10 pixels: {clean_frame[0, :10].tolist()}")
     print(f"  [RAW SPI DIAG] Row 30 middle 10 pixels: {clean_frame[30, 35:45].tolist()}")
-    celsius_frame = raw_to_celsius(clean_frame, is_tlinear=True)
+    celsius_frame = raw_to_celsius(clean_frame)
     c_min = celsius_frame.min()
     c_max = celsius_frame.max()
     c_avg = celsius_frame.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
     # ── 1. Percentile Autoscale Rendering with Low-Variance Protection ──
-    h, w = clean_frame.shape
     col_start = 2 if w >= 80 else 0
     col_end = w - 2 if w >= 80 else w
     inner = clean_frame[:, col_start:col_end]

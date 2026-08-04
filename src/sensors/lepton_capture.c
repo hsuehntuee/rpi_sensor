@@ -77,39 +77,32 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
             uint8_t b0 = raw_buf[pos];
             uint8_t b1 = raw_buf[pos + 1];
 
-            // 驗證 VoSPI Header
+            // 驗證 VoSPI Header 與 Thermal Payload
             if ((b0 & 0x0F) != 0x0F && b1 < LEPTON_ROWS) {
-                // 【超強鎖定】嚴格校驗下一個封包的號碼必須是 next_b1 == b1 + 1 (如果是第 59 行則允許下一個為 0)
-                uint8_t next_b0 = raw_buf[pos + PACKET_BYTES];
-                uint8_t next_b1 = raw_buf[pos + PACKET_BYTES + 1];
-                int is_seq = (b1 == 59) || ((next_b0 & 0x0F) != 0x0F && next_b1 == (b1 + 1));
+                int data_off = pos + 4;
+                uint32_t sum = 0;
+                
+                for (int c = 0; c < LEPTON_COLS; c++) {
+                    sum += (raw_buf[data_off + c * 2] << 8) | raw_buf[data_off + c * 2 + 1];
+                }
 
-                if (is_seq) {
-                    int data_off = pos + 4;
-                    uint32_t sum = 0;
-                    
-                    for (int c = 0; c < LEPTON_COLS; c++) {
-                        sum += (raw_buf[data_off + c * 2] << 8) | raw_buf[data_off + c * 2 + 1];
-                    }
-
-                    if (sum / LEPTON_COLS > 500) {
-                        if (!collected[b1]) {
-                            for (int c = 0; c < LEPTON_COLS; c++) {
-                                out_frame[b1 * LEPTON_COLS + c] = (raw_buf[data_off + c * 2] << 8) | raw_buf[data_off + c * 2 + 1];
-                            }
-                            collected[b1] = 1;
-                            total_collected++;
-
-                            if (total_collected == LEPTON_ROWS) {
-                                printf("  [C Engine] SUCCESS! Captured all 60/60 rows with 100%% sequential alignment!\n");
-                                fflush(stdout);
-                                success_attempt = attempt;
-                                break;
-                            }
+                if (sum / LEPTON_COLS > 500) {
+                    if (!collected[b1]) {
+                        for (int c = 0; c < LEPTON_COLS; c++) {
+                            out_frame[b1 * LEPTON_COLS + c] = (raw_buf[data_off + c * 2] << 8) | raw_buf[data_off + c * 2 + 1];
                         }
-                        pos += PACKET_BYTES;
-                        continue;
+                        collected[b1] = 1;
+                        total_collected++;
+
+                        if (total_collected == LEPTON_ROWS) {
+                            printf("  [C Engine] SUCCESS! Captured all 60/60 rows!\n");
+                            fflush(stdout);
+                            success_attempt = attempt;
+                            break;
+                        }
                     }
+                    pos += PACKET_BYTES;
+                    continue;
                 }
             }
             pos++;

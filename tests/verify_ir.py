@@ -476,6 +476,13 @@ def main() -> None:
     c_avg = celsius_valid.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
+    # Auto-repair vertical dead columns (eliminates vertical line artifacts)
+    col_means = clean_frame.mean(axis=0)
+    for c in range(1, w - 1):
+        neighbor_avg = (col_means[c - 1] + col_means[c + 1]) / 2.0
+        if col_means[c] < 500 or abs(col_means[c] - neighbor_avg) > 800:
+            clean_frame[:, c] = ((clean_frame[:, c - 1].astype(np.float32) + clean_frame[:, c + 1].astype(np.float32)) / 2.0).astype(np.uint16)
+
     # ── 1. Percentile Autoscale Rendering with Low-Variance Protection ──
     col_start = 2 if w >= 80 else 0
     col_end = w - 2 if w >= 80 else w
@@ -505,7 +512,25 @@ def main() -> None:
     # Horizontal flip
     scaled = np.fliplr(scaled)
 
-    rgb_autoscale = apply_thermal_colormap(scaled, "ironbow")
+    # 3x3 Median De-striping Filter
+    pad = np.pad(scaled, 1, mode="edge")
+    stacked = np.stack([
+        pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:],
+        pad[1:-1, :-2], pad[1:-1, 1:-1], pad[1:-1, 2:],
+        pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
+    ], axis=0)
+    destriped = np.median(stacked, axis=0).astype(np.uint8)
+
+    # 2D Gaussian Thermal Gradient Smoother (Silky smooth FLIR heatmaps)
+    gpad = np.pad(destriped, 1, mode="edge")
+    smooth = (
+        gpad[:-2, :-2].astype(np.float32) * 1 + gpad[:-2, 1:-1].astype(np.float32) * 2 + gpad[:-2, 2:].astype(np.float32) * 1 +
+        gpad[1:-1, :-2].astype(np.float32) * 2 + gpad[1:-1, 1:-1].astype(np.float32) * 4 + gpad[1:-1, 2:].astype(np.float32) * 2 +
+        gpad[2:, :-2].astype(np.float32) * 1 + gpad[2:, 1:-1].astype(np.float32) * 2 + gpad[2:, 2:].astype(np.float32) * 1
+    ) / 16.0
+    destriped = smooth.astype(np.uint8)
+
+    rgb_autoscale = apply_thermal_colormap(destriped, "ironbow")
     
     filename_auto = f"{timestamp}_ir_ironbow.jpg"
     save_path_auto = image_dir / filename_auto
@@ -520,12 +545,6 @@ def main() -> None:
     save_path_fixed = image_dir / filename_auto_fixed
     img_fixed = Image.fromarray(rgb_fixed, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
     img_fixed.save(save_path_fixed, format="JPEG", quality=95)
-
-    # ── 4. De-striping Filter ──
-    destriped = scaled.copy()
-    for r in range(1, ROWS - 1):
-        for c in range(1, COLS - 1):
-            destriped[r, c] = int(np.median(scaled[r-1:r+2, c-1:c+2]))
 
     # 1. White Hot
     filename_whitehot = f"{timestamp}_ir_whitehot.jpg"

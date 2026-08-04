@@ -673,6 +673,13 @@ class PiIRCamera(RGBCamera):
                     nearest_row = valid_rows[np.argmin(np.abs(valid_rows - r))]
                     clean_frame[r, :] = clean_frame[nearest_row, :]
 
+        # Auto-repair vertical dead columns (eliminates vertical line artifacts)
+        col_means = clean_frame.mean(axis=0)
+        for c in range(1, w - 1):
+            neighbor_avg = (col_means[c - 1] + col_means[c + 1]) / 2.0
+            if col_means[c] < 500 or abs(col_means[c] - neighbor_avg) > 800:
+                clean_frame[:, c] = ((clean_frame[:, c - 1].astype(np.float32) + clean_frame[:, c + 1].astype(np.float32)) / 2.0).astype(np.uint16)
+
         if self.fixed_temp_range is not None:
             # Mode A: 100% Fixed Absolute Temperature Range (e.g. 18°C to 36°C)
             min_temp, max_temp = self.fixed_temp_range
@@ -715,7 +722,7 @@ class PiIRCamera(RGBCamera):
             # Horizontal flip matching verify_ir.py
             scaled = np.fliplr(scaled)
 
-            # De-striping 3x3 median filter (Vectorized numpy - 1ms high performance)
+            # 3x3 Median De-striping Filter
             pad = np.pad(scaled, 1, mode="edge")
             stacked = np.stack([
                 pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:],
@@ -723,6 +730,15 @@ class PiIRCamera(RGBCamera):
                 pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
             ], axis=0)
             destriped = np.median(stacked, axis=0).astype(np.uint8)
+
+            # 2D Gaussian Thermal Gradient Smoother (Silky smooth FLIR heatmaps)
+            gpad = np.pad(destriped, 1, mode="edge")
+            smooth = (
+                gpad[:-2, :-2].astype(np.float32) * 1 + gpad[:-2, 1:-1].astype(np.float32) * 2 + gpad[:-2, 2:].astype(np.float32) * 1 +
+                gpad[1:-1, :-2].astype(np.float32) * 2 + gpad[1:-1, 1:-1].astype(np.float32) * 4 + gpad[1:-1, 2:].astype(np.float32) * 2 +
+                gpad[2:, :-2].astype(np.float32) * 1 + gpad[2:, 1:-1].astype(np.float32) * 2 + gpad[2:, 2:].astype(np.float32) * 1
+            ) / 16.0
+            destriped = smooth.astype(np.uint8)
 
             if self.colormap in ("gray", "whitehot"):
                 img = Image.fromarray(destriped, mode="L")

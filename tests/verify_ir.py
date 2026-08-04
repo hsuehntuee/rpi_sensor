@@ -265,15 +265,17 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | 
 
 
 
-def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool = True) -> np.ndarray:
+def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool | None = None) -> np.ndarray:
     """Convert raw 14-bit Lepton pixels directly into absolute Celsius temperatures (°C).
     
-    For Lepton 2.5 Radiometric mode (TLinear Enabled):
-    1 LSB = 0.01 Kelvin (10 mK).
-    Formula: Celsius = (raw / 100.0) - 273.15
+    Auto-detects TLinear mode:
+    - If mean raw ADU > 20000 (TLinear Centi-Kelvin mode): Celsius = (raw / 100.0) - 273.15
+    - If mean raw ADU <= 20000 (Raw 14-bit ADU mode): Celsius = 25.0 + (raw - 8192.0) / 40.0
     """
     raw_float = raw_frame.astype(np.float32)
-    if is_tlinear:
+    mean_val = float(raw_float.mean()) if raw_float.size > 0 else 0.0
+
+    if is_tlinear is True or (is_tlinear is None and mean_val > 20000.0):
         celsius = (raw_float / 100.0) - 273.15
     else:
         # Fallback estimation for non-TLinear raw counts (~40 LSB / °C centered at 25°C)
@@ -473,20 +475,37 @@ def main() -> None:
     c_avg = celsius_frame.mean()
     print(f"\n  [Absolute Temp] Measured Range: Min={c_min:.2f}°C, Max={c_max:.2f}°C, Avg={c_avg:.2f}°C")
     
-    # ── 1. Percentile Autoscale Rendering (Filtering Zero Padding & Edge Artifacts) ──
-    valid_pixels = clean_frame[clean_frame > 500]
+    # ── 1. Percentile Autoscale Rendering with Low-Variance Protection ──
+    h, w = clean_frame.shape
+    col_start = 2 if w >= 80 else 0
+    col_end = w - 2 if w >= 80 else w
+    inner = clean_frame[:, col_start:col_end]
+    valid_pixels = inner[inner > 500]
+
     if len(valid_pixels) > 0:
-        p2 = np.percentile(valid_pixels, 1)
-        p98 = np.percentile(valid_pixels, 99)
+        p_min = float(np.percentile(valid_pixels, 5))
+        p_max = float(np.percentile(valid_pixels, 95))
+        center = float(np.median(valid_pixels))
+
+        MIN_DELTA_ADU = 150.0  # ~1.5°C minimum dynamic range window
+        current_delta = p_max - p_min
+        if current_delta < MIN_DELTA_ADU:
+            half_window = MIN_DELTA_ADU / 2.0
+            p_min = max(0.0, center - half_window)
+            p_max = center + half_window
+
+        scaled = (np.clip((clean_frame - p_min) / (p_max - p_min), 0.0, 1.0) * 255.0).astype(np.uint8)
     else:
-        p2, p98 = 0.0, 1.0
+        scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
 
-    if p98 <= p2:
-        p98 = p2 + 1.0
+    if w >= 80:
+        scaled[:, 0:2] = scaled[:, 2:3]
+        scaled[:, w - 2 : w] = scaled[:, w - 3 : w - 2]
 
-    scaled_uint8 = (np.clip((clean_frame - p2) / (p98 - p2), 0, 1) * 255.0).astype(np.uint8)
-    rgb_autoscale = apply_thermal_colormap(scaled_uint8, "ironbow")
-    rgb_autoscale = np.fliplr(rgb_autoscale)
+    # Horizontal flip
+    scaled = np.fliplr(scaled)
+
+    rgb_autoscale = apply_thermal_colormap(scaled, "ironbow")
     
     filename_auto = f"{timestamp}_ir_ironbow.jpg"
     save_path_auto = image_dir / filename_auto
@@ -494,20 +513,13 @@ def main() -> None:
     img_auto.save(save_path_auto, format="JPEG", quality=95)
     print(f"  SUCCESS: Saved Autoscale Ironbow Thermal image to {save_path_auto}")
 
+    # Fixed Temperature Scale (18°C - 36°C)
+    rgb_fixed = render_fixed_range_frame(celsius_frame, min_temp=18.0, max_temp=36.0, colormap="ironbow")
+    rgb_fixed = np.fliplr(rgb_fixed)
     filename_auto_fixed = f"{timestamp}_ir_fixed_18_36c.jpg"
     save_path_fixed = image_dir / filename_auto_fixed
-    img_auto.save(save_path_fixed, format="JPEG", quality=95)
-
-    # ── 3. Dynamic Human Face Thermal Enhancer ──
-    p_min = np.percentile(clean_frame, 5)
-    p_max = np.percentile(clean_frame, 95)
-    if p_max > p_min:
-        clipped = np.clip(clean_frame, p_min, p_max)
-        scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
-    else:
-        scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
-
-    scaled = np.fliplr(scaled)
+    img_fixed = Image.fromarray(rgb_fixed, mode="RGB").resize((640, 480), Image.Resampling.BICUBIC)
+    img_fixed.save(save_path_fixed, format="JPEG", quality=95)
 
     # ── 4. De-striping Filter ──
     destriped = scaled.copy()

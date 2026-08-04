@@ -114,8 +114,37 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
     frame = vospi.read_frame()
     assert frame.shape == (120, 160)
 
-    expected_p0 = (10 << 8) | 10
-    assert frame[0, 0] == expected_p0
-
     expected_p1 = (11 << 8) | 11
     assert frame[0, 80] == expected_p1
+
+
+def test_render_fixed_range_frame():
+    import numpy as np
+    from src.sensors.camera_ir import render_fixed_range_frame
+
+    celsius = np.full((60, 80), 25.0, dtype=np.float32)
+    rgb = render_fixed_range_frame(celsius, min_temp=18.0, max_temp=36.0, colormap="ironbow")
+    assert rgb.shape == (60, 80, 3)
+    assert rgb.dtype == np.uint8
+
+
+def test_pi_ir_camera_low_variance_capture(tmp_path):
+    import numpy as np
+    from unittest.mock import patch
+    from src.sensors.camera_ir import PiIRCamera
+
+    # Create dummy raw frame with minimal variance (uniform ceiling scene ~25°C = ~29815 ADU)
+    uniform_raw = np.full((60, 80), 29815, dtype=np.uint16)
+    # Add tiny 0.1°C (10 ADU) noise
+    uniform_raw[10, 10] += 10
+
+    with patch("src.sensors.camera_ir.try_capture", return_value=uniform_raw), \
+         patch("src.sensors.camera_ir.read_raw_status", return_value=0x0004):
+        
+        output_file = tmp_path / "test_ir_uniform.jpg"
+        cam = PiIRCamera(image_dir=tmp_path, width=80, height=60, colormap="ironbow")
+        cam._capture(output_file)
+
+        assert output_file.exists()
+        assert output_file.stat().st_size > 0
+

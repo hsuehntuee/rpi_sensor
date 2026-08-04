@@ -381,12 +381,20 @@ class LeptonVoSPI:
 
 
 
-def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool = True) -> np.ndarray:
-    """Convert raw 14-bit Lepton pixels directly into absolute Celsius temperatures (°C)."""
+def raw_to_celsius(raw_frame: np.ndarray, is_tlinear: bool | None = None) -> np.ndarray:
+    """Convert raw 14-bit Lepton pixels directly into absolute Celsius temperatures (°C).
+    
+    Auto-detects TLinear mode:
+    - If mean raw ADU > 20000 (TLinear Centi-Kelvin mode): Celsius = (raw / 100.0) - 273.15
+    - If mean raw ADU <= 20000 (Raw 14-bit ADU mode): Celsius = 25.0 + (raw - 8192.0) / 40.0
+    """
     raw_float = raw_frame.astype(np.float32)
-    if is_tlinear:
+    mean_val = float(raw_float.mean()) if raw_float.size > 0 else 0.0
+
+    if is_tlinear is True or (is_tlinear is None and mean_val > 20000.0):
         celsius = (raw_float / 100.0) - 273.15
     else:
+        # Fallback estimation for non-TLinear raw counts (~40 LSB / °C centered at 25°C)
         celsius = 25.0 + (raw_float - 8192.0) / 40.0
     return celsius
 
@@ -566,6 +574,22 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | 
     return None
 
 
+def send_lepton_ffc_command(bus_number: int = 1, address: int = 0x2A) -> bool:
+    """Send SYS Run FFC (Flat Field Correction) command (0x0240) over CCI I2C to recalibrate FPA."""
+    try:
+        from smbus2 import SMBus, i2c_msg
+        with SMBus(bus_number) as bus:
+            data_len_req = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
+            bus.i2c_rdwr(data_len_req)
+            time.sleep(0.01)
+            cmd_req = i2c_msg.write(address, [0x00, 0x04, 0x02, 0x40])
+            bus.i2c_rdwr(cmd_req)
+            time.sleep(0.5)
+            return True
+    except Exception:
+        return False
+
+
 def render_fixed_range_frame(celsius_frame: np.ndarray, min_temp: float = 18.0,
                                max_temp: float = 36.0, colormap: str = "ironbow") -> np.ndarray:
     """Render thermal image using fixed temperature range (e.g. 18°C to 36°C)."""
@@ -586,10 +610,12 @@ class PiIRCamera(RGBCamera):
         height: int = 60,
         colormap: str = "ironbow",
         upscale_factor: int = 8,
+        fixed_temp_range: tuple[float, float] | None = None,
     ) -> None:
         self.vospi = LeptonVoSPI(spi_bus, spi_device, width, height)
         self.colormap = colormap
         self.upscale_factor = upscale_factor
+        self.fixed_temp_range = fixed_temp_range
         super().__init__(image_dir, self._capture, image_type="ir")
 
     def _capture(self, path: Path) -> None:
@@ -612,7 +638,7 @@ class PiIRCamera(RGBCamera):
         # 2. Execute golden VoSPI capture engine (matching verify_ir.py)
         reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device)
         try:
-            raw_frame = try_capture(reader, max_attempts=1500)
+            raw_frame = try_capture(reader, max_seconds=15.0)
         except Exception:
             raw_frame = None
         finally:
@@ -627,34 +653,64 @@ class PiIRCamera(RGBCamera):
                 self.vospi.close()
 
         clean_frame = raw_frame & 0x3FFF
+        h, w = clean_frame.shape
 
-        # Percentile dynamic range scaling on inner thermal payload (cols 2..78)
-        inner = clean_frame[:, 2:78]
-        p_min = np.percentile(inner, 5)
-        p_max = np.percentile(inner, 95)
-        if p_max > p_min:
-            clipped = np.clip(clean_frame, p_min, p_max)
-            scaled = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
-        else:
-            scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
-
-        # Horizontal flip matching verify_ir.py
-        scaled = np.fliplr(scaled)
-
-        # De-striping 3x3 median filter (Vectorized numpy - 1ms high performance)
-        pad = np.pad(scaled, 1, mode="edge")
-        stacked = np.stack([
-            pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:],
-            pad[1:-1, :-2], pad[1:-1, 1:-1], pad[1:-1, 2:],
-            pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
-        ], axis=0)
-        destriped = np.median(stacked, axis=0).astype(np.uint8)
-
-        if self.colormap in ("gray", "whitehot"):
-            img = Image.fromarray(destriped, mode="L")
-        else:
-            rgb_array = apply_thermal_colormap(destriped, colormap=self.colormap)
+        if self.fixed_temp_range is not None:
+            # Mode A: 100% Fixed Absolute Temperature Range (e.g. 18°C to 36°C)
+            min_temp, max_temp = self.fixed_temp_range
+            celsius_frame = raw_to_celsius(clean_frame, is_tlinear=True)
+            rgb_array = render_fixed_range_frame(
+                celsius_frame, min_temp=min_temp, max_temp=max_temp, colormap=self.colormap
+            )
+            # Horizontal flip
+            rgb_array = np.fliplr(rgb_array)
             img = Image.fromarray(rgb_array, mode="RGB")
+        else:
+            # Mode B: Smart Dynamic Autoscale with low-variance (min delta) protection
+            col_start = 2 if w >= 80 else 0
+            col_end = w - 2 if w >= 80 else w
+            inner = clean_frame[:, col_start:col_end]
+            valid_pixels = inner[inner > 500]
+
+            if len(valid_pixels) > 0:
+                p_min = float(np.percentile(valid_pixels, 5))
+                p_max = float(np.percentile(valid_pixels, 95))
+                center = float(np.median(valid_pixels))
+
+                # Minimum 150 ADU (~1.5°C) dynamic window to prevent noise hyper-saturation in uniform scenes
+                MIN_DELTA_ADU = 150.0
+                current_delta = p_max - p_min
+                if current_delta < MIN_DELTA_ADU:
+                    half_window = MIN_DELTA_ADU / 2.0
+                    p_min = max(0.0, center - half_window)
+                    p_max = center + half_window
+
+                scaled = (np.clip((clean_frame - p_min) / (p_max - p_min), 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                scaled = np.zeros(clean_frame.shape, dtype=np.uint8)
+
+            # Clean edge telemetry/padding columns
+            if w >= 80:
+                scaled[:, 0:2] = scaled[:, 2:3]
+                scaled[:, w - 2 : w] = scaled[:, w - 3 : w - 2]
+
+            # Horizontal flip matching verify_ir.py
+            scaled = np.fliplr(scaled)
+
+            # De-striping 3x3 median filter (Vectorized numpy - 1ms high performance)
+            pad = np.pad(scaled, 1, mode="edge")
+            stacked = np.stack([
+                pad[:-2, :-2], pad[:-2, 1:-1], pad[:-2, 2:],
+                pad[1:-1, :-2], pad[1:-1, 1:-1], pad[1:-1, 2:],
+                pad[2:, :-2], pad[2:, 1:-1], pad[2:, 2:]
+            ], axis=0)
+            destriped = np.median(stacked, axis=0).astype(np.uint8)
+
+            if self.colormap in ("gray", "whitehot"):
+                img = Image.fromarray(destriped, mode="L")
+            else:
+                rgb_array = apply_thermal_colormap(destriped, colormap=self.colormap)
+                img = Image.fromarray(rgb_array, mode="RGB")
 
         if self.upscale_factor > 1:
             new_w = self.vospi.width * self.upscale_factor

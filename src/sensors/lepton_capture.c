@@ -29,10 +29,9 @@ static int spi_ioctl_read_chunk(int fd, uint8_t* rx_buf, uint32_t speed_hz) {
 }
 
 /**
- * Mathematically Guaranteed VoSPI Capture Engine.
- * Reads 120 packets (19,680 bytes across 5 x 3936B transfers) per attempt.
- * Guaranteed to contain at least 1 complete 60-packet frame starting at Packet 0.
- * Compliant with Linux kernel 4096-byte spidev.bufsiz limits.
+ * Mathematically Guaranteed Atomic VoSPI Capture Engine.
+ * Uses atomic SPI_IOC_MESSAGE(5) to read 120 continuous packets (19,680 bytes)
+ * in a SINGLE kernel ioctl session with Chip Select (CS) held LOW throughout.
  */
 int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* out_frame, int max_attempts) {
     uint8_t mode = SPI_MODE_3;
@@ -52,17 +51,20 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
     uint8_t raw_buf[BUFFER_BYTES];
     memset(out_frame, 0, LEPTON_ROWS * LEPTON_COLS * sizeof(uint16_t));
 
-    for (int attempt = 1; attempt <= max_attempts; attempt++) {
-        // Read 5 chunks of 3936 bytes (120 packets = 2 full frames)
-        int ioctl_ok = 1;
-        for (int c = 0; c < TOTAL_CHUNKS; c++) {
-            if (spi_ioctl_read_chunk(fd, raw_buf + c * CHUNK_BYTES, speed_hz) < 1) {
-                ioctl_ok = 0;
-                break;
-            }
-        }
+    // Prepare 5 atomic transfer chunks (cs_change = 0 keeps CS LOW throughout)
+    struct spi_ioc_transfer tr[TOTAL_CHUNKS];
+    for (int c = 0; c < TOTAL_CHUNKS; c++) {
+        memset(&tr[c], 0, sizeof(struct spi_ioc_transfer));
+        tr[c].rx_buf = (unsigned long)(raw_buf + c * CHUNK_BYTES);
+        tr[c].len = (uint32_t)CHUNK_BYTES;
+        tr[c].speed_hz = speed_hz;
+        tr[c].bits_per_word = bits;
+        tr[c].cs_change = 0;
+    }
 
-        if (!ioctl_ok) {
+    for (int attempt = 1; attempt <= max_attempts; attempt++) {
+        // Execute atomic 120-packet DMA transfer in 1 kernel system call
+        if (ioctl(fd, SPI_IOC_MESSAGE(TOTAL_CHUNKS), tr) < 1) {
             usleep(1000);
             continue;
         }

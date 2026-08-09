@@ -108,7 +108,7 @@ class RemoteSync:
                         data={
                             "device_id": row["device_id"],
                             "timestamp": timestamp,
-                            "image_type": row["image_type"],
+                            "image_type": str(row["image_type"]).upper(),
                         },
                         files={"image": (path.name, image, "image/jpeg")},
                         headers=self.headers,

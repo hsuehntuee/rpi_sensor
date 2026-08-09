@@ -46,20 +46,7 @@ chmod +x start_edge.sh
 
 *(提示：首次啟動後，請確保您的 `.env` 檔案內正確設定了 `DEVICE_ID`、`SERVER_URL` 和 `API_KEY`。)*
 
----
 
-## 🔌 FLIR Lepton 3.X 核心支援與外部專案清理說明
-
-本專案已將外部專案 [`Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera`](./Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera) 的 Lepton 3.X (160x120) 4 分段 VoSPI 影像解析核心技術與拼接演算法，完全移植並重構於本專案的底層驅動中：
-- Native C 驅動：[`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c)
-- Python 相機介面：[`src/sensors/camera_ir.py`](src/sensors/camera_ir.py)
-
-### 🧹 您可以安全刪除外部子目錄
-因為我們已經將 160x120 影像獲取功能直接整合進 Python 容器，**您不需要在樹莓派上編譯運作圖形化的 Qt 串流程式，也不需要 TV 輸出相關的硬體配置**。
-因此，您可以放心地執行以下命令**刪除外部子專案目錄**以保持專案乾淨：
-```bash
-rm -rf Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera
-```
 
 ---
 

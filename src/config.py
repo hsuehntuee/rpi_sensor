@@ -54,12 +54,20 @@ def load_settings(env_file: str | None = None) -> Settings:
     server_url = os.getenv("SERVER_URL", "http://localhost:8000").strip().rstrip("/")
     if not server_url:
         server_url = "http://localhost:8000"
+    raw_db_path = os.getenv("DATABASE_PATH", "/data/sensor.db").strip()
+    if raw_db_path and not raw_db_path.startswith("/"):
+        raw_db_path = "/" + raw_db_path
+
+    raw_img_dir = os.getenv("IMAGE_DIR", "/data/images").strip()
+    if raw_img_dir and not raw_img_dir.startswith("/"):
+        raw_img_dir = "/" + raw_img_dir
+
     settings = Settings(
         device_id=device_id,
         server_url=server_url,
         api_key=api_key,
-        database_path=Path(os.getenv("DATABASE_PATH", "data/sensor.db")),
-        image_dir=Path(os.getenv("IMAGE_DIR", "data/images")),
+        database_path=Path(raw_db_path),
+        image_dir=Path(raw_img_dir),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "10")),
         scd41_i2c_bus=_int("SCD41_I2C_BUS", "2"),

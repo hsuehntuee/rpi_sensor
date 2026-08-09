@@ -685,7 +685,7 @@ class PiIRCamera(RGBCamera):
         spi_device: int = 0,
         width: int = 80,
         height: int = 60,
-        colormap: str = "ironbow",
+        colormap: str = "rainbow",
         upscale_factor: int = 8,
         fixed_temp_range: tuple[float, float] | None = None,
     ) -> None:

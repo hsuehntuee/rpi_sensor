@@ -271,6 +271,7 @@ def main() -> None:
             spi_device=settings.lepton_spi_device,
             width=model.width,
             height=model.height,
+            colormap=settings.lepton_colormap,
         )
         LOGGER.info("Successfully initialized FLIR Lepton IR Camera on SPI bus %d, device %d",
                     settings.lepton_spi_bus, settings.lepton_spi_device)

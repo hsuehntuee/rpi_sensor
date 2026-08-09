@@ -35,6 +35,7 @@ class Settings:
     lepton_i2c_address: int
     lepton_width: int | None
     lepton_height: int | None
+    lepton_colormap: str
     modbus_port: str
     modbus_baudrate: int
     modbus_slave_id: int | None
@@ -80,6 +81,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         lepton_i2c_address=_int("LEPTON_I2C_ADDRESS", "0x2A"),
         lepton_width=_optional_int("LEPTON_WIDTH") or 160,
         lepton_height=_optional_int("LEPTON_HEIGHT") or 120,
+        lepton_colormap=os.getenv("LEPTON_COLORMAP", "rainbow").lower(),
         modbus_port=os.getenv("MODBUS_PORT", "/dev/ttyUSB0"),
         modbus_baudrate=int(os.getenv("MODBUS_BAUDRATE", "9600")),
         modbus_slave_id=_optional_int("MODBUS_SLAVE_ID"),

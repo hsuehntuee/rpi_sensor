@@ -60,11 +60,11 @@ if command -v docker-compose &>/dev/null && ! command -v docker &>/dev/null; the
     log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
     docker-compose logs -f edge-sensor
 else
-    if docker compose version &>/dev/null; then
+    if docker info &>/dev/null; then
         docker compose up --build -d
         log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
         docker compose logs -f edge-sensor
-    elif sg docker -c "docker compose version" &>/dev/null; then
+    elif sg docker -c "docker info" &>/dev/null; then
         log "Running docker compose under 'docker' group..."
         sg docker -c "docker compose up --build -d"
         log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."

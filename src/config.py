@@ -51,9 +51,12 @@ def load_settings(env_file: str | None = None) -> Settings:
     api_key = os.getenv("API_KEY", "default_secret_api_key_1234567890").strip()
     if len(api_key) < 16:
         api_key = "default_secret_api_key_1234567890"
+    server_url = os.getenv("SERVER_URL", "http://localhost:8000").strip().rstrip("/")
+    if not server_url:
+        server_url = "http://localhost:8000"
     settings = Settings(
         device_id=device_id,
-        server_url=os.getenv("SERVER_URL", "").rstrip("/"),
+        server_url=server_url,
         api_key=api_key,
         database_path=Path(os.getenv("DATABASE_PATH", "data/sensor.db")),
         image_dir=Path(os.getenv("IMAGE_DIR", "data/images")),

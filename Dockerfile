@@ -13,6 +13,7 @@ RUN apt-get update \
        i2c-tools \
        libgpiod2 \
        gcc \
+       g++ \
        python3-dev \
        ffmpeg \
        v4l-utils \

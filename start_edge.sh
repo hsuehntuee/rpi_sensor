@@ -54,13 +54,25 @@ fi
 
 # 5. Build and run containers
 log "Building and starting containerized services..."
-if docker compose version &>/dev/null; then
-    docker compose up --build -d
-elif docker-compose version &>/dev/null; then
-    docker-compose up --build -d
-else
-    error "Neither 'docker compose' nor 'docker-compose' command found. Please check your Docker installation."
-fi
 
-log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
-docker compose logs -f edge-sensor
+if command -v docker-compose &>/dev/null && ! command -v docker &>/dev/null; then
+    docker-compose up --build -d
+    log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+    docker-compose logs -f edge-sensor
+else
+    if docker compose version &>/dev/null; then
+        docker compose up --build -d
+        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        docker compose logs -f edge-sensor
+    elif sg docker -c "docker compose version" &>/dev/null; then
+        log "Running docker compose under 'docker' group..."
+        sg docker -c "docker compose up --build -d"
+        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        sg docker -c "docker compose logs -f edge-sensor"
+    else
+        warn "Permission to docker socket denied. Running with sudo..."
+        sudo docker compose up --build -d
+        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        sudo docker compose logs -f edge-sensor
+    fi
+fi

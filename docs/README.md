@@ -6,12 +6,21 @@
 
 為了避免「一對多」共用電源、地線或 I2C 匯流排所導致的實體接線混亂，本系統採用 **完全 1-to-1 的直連配線**（每個感測器引腳均直連樹莓派的獨立引腳，不需麵包板或銲接分流）。
 
-### 樹莓派 5 實體引腳 FLIR Lepton 1-to-1 接線表
+### 樹莓派 5 實體引腳 1-to-1 完整硬體接線表
 
+#### 1. SCD41 CO2 / 溫濕度感測器 接線表
+| 樹莓派 5 實體腳位 | BCM 功能定義 | SCD41 腳位 | 功能說明 |
+| :--- | :--- | :--- | :--- |
+| **Pin 1** | 3.3V Power | **VIN** | SCD41 3.3V 電源輸入 |
+| **Pin 6** | Ground | **GND** | SCD41 系統接地 |
+| **Pin 32** | GPIO12 (SDA2) | **SDA** | SCD41 I2C2 數據線 (腳位 32) |
+| **Pin 33** | GPIO13 (SCL2) | **SCL** | SCD41 I2C2 時鐘線 (腳位 33) |
+
+#### 2. FLIR Lepton 3.X 熱感應相機 接線表
 | 樹莓派 5 實體腳位 | BCM 功能定義 | FLIR Lepton 模組腳位 | 功能與佔線狀態說明 |
 | :--- | :--- | :--- | :--- |
-| **Pin 1 (或 Pin 17)** | 3.3V Power | **VIN** | 3.3V 電源輸入 |
-| **Pin 6 (或 Pin 9)** | Ground | **GND** | 系統接地 (Ground) |
+| **Pin 17** | 3.3V Power | **VIN** | Lepton 3.3V 電源輸入 |
+| **Pin 9** | Ground | **GND** | Lepton 系統接地 |
 | **Pin 23** | GPIO11 (SPI0 SCLK) | **CLK** | Lepton VoSPI 影像時鐘線 |
 | **Pin 21** | GPIO9 (SPI0 MISO) | **MISO** | Lepton VoSPI 影像數據輸出線 |
 | **Pin 19** | GPIO10 (SPI0 MOSI) | **MOSI** | SPI0 數據輸入線 *(實體已接，傳輸時忽略，無佔線衝突)* |

@@ -15,6 +15,8 @@ RUN apt-get update \
        gcc \
        g++ \
        python3-dev \
+       libjpeg-dev \
+       zlib1g-dev \
        ffmpeg \
        v4l-utils \
     && curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg \

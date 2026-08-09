@@ -374,7 +374,8 @@ def main() -> None:
         except (ValueError, OSError):
             pass
 
-    # Execute initial sync immediately on startup
+    # Execute initial sync & camera capture immediately on startup
+    guarded("initial_camera", camera_task)()
     guarded("initial_sync", sync_task)()
 
     scheduler.start()

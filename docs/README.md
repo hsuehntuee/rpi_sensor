@@ -6,21 +6,19 @@
 
 為了避免「一對多」共用電源、地線或 I2C 匯流排所導致的實體接線混亂，本系統採用 **完全 1-to-1 的直連配線**（每個感測器引腳均直連樹莓派的獨立引腳，不需麵包板或銲接分流）。
 
-### 樹莓派 5 實體引腳 1-to-1 接線表
+### 樹莓派 5 實體引腳 FLIR Lepton 1-to-1 接線表
 
-| 樹莓派 5 實體腳位 | BCM 功能定義 | 連接的設備與腳位 | 功能說明 |
+| 樹莓派 5 實體腳位 | BCM 功能定義 | FLIR Lepton 模組腳位 | 功能與佔線狀態說明 |
 | :--- | :--- | :--- | :--- |
-| **Pin 1** | 3.3V Power | **SCD41 - VIN** | SCD41 3.3V 電源輸入 |
-| **Pin 6** | Ground | **SCD41 - GND** | SCD41 地線 |
-| **Pin 3** | GPIO2 (SDA1) | **Lepton Breakout - Pin 5 (SDA)** | Lepton CCI I2C1 數據線 (分流) |
-| **Pin 5** | GPIO3 (SCL1) | **Lepton Breakout - Pin 8 (SCL)** | Lepton CCI I2C1 時鐘線 (分流) |
-| **Pin 17** | 3.3V Power | **Lepton Breakout - Pin 2 (VIN)** | Lepton 3.3V 電源輸入 (分流) |
-| **Pin 9** | Ground | **Lepton Breakout - Pin 1 (GND)** | Lepton 地線 (分流) |
-| **Pin 32** | GPIO12 (SDA2) | **SCD41 - SDA** | SCD41 I2C2 數據線 |
-| **Pin 33** | GPIO13 (SCL2) | **SCD41 - SCL** | SCD41 I2C2 時鐘線 |
-| **Pin 21** | GPIO9 (SPI MISO)| **Lepton Breakout - Pin 12 (MISO)**| Lepton VoSPI 影像傳輸線 |
-| **Pin 23** | GPIO11 (SCLK) | **Lepton Breakout - Pin 7 (CLK)** | Lepton VoSPI 影像時鐘線 |
-| **Pin 24** | GPIO8 (SPI CE0) | **Lepton Breakout - Pin 10 (CS)** | Lepton VoSPI 影像片選線 |
+| **Pin 1 (或 Pin 17)** | 3.3V Power | **VIN** | 3.3V 電源輸入 |
+| **Pin 6 (或 Pin 9)** | Ground | **GND** | 系統接地 (Ground) |
+| **Pin 23** | GPIO11 (SPI0 SCLK) | **CLK** | Lepton VoSPI 影像時鐘線 |
+| **Pin 21** | GPIO9 (SPI0 MISO) | **MISO** | Lepton VoSPI 影像數據輸出線 |
+| **Pin 19** | GPIO10 (SPI0 MOSI) | **MOSI** | SPI0 數據輸入線 *(實體已接，傳輸時忽略，無佔線衝突)* |
+| **Pin 24** | GPIO8 (SPI0 CE0) | **CS** | Lepton VoSPI 影像片選線 (Chip Select) |
+| **Pin 3** | GPIO2 (I2C1 SDA) | **SDA** | Lepton CCI I2C1 數據線 (與其他 I2C 設備位址 `0x2A` 隔離) |
+| **Pin 5** | GPIO3 (I2C1 SCL) | **SCL** | Lepton CCI I2C1 時鐘線 |
+| **Pin 11** | GPIO17 | **VSYNC** | Lepton 硬體影格同步腳位 *(獨立引腳，無佔線衝突)* |
 
 ---
 

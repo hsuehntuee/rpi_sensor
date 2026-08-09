@@ -261,8 +261,8 @@ def main() -> None:
         model = probe_lepton(
             bus_number=settings.lepton_i2c_bus,
             address=settings.lepton_i2c_address,
-            fallback_width=settings.lepton_width,
-            fallback_height=settings.lepton_height,
+            fallback_width=settings.lepton_width or 160,
+            fallback_height=settings.lepton_height or 120,
         )
         LOGGER.info("Detected FLIR Lepton: %s (%dx%d)", model.family, model.width, model.height)
         ir_camera = PiIRCamera(

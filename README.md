@@ -34,20 +34,31 @@ curl http://127.0.0.1:8000/health
 
 ### 2. 樹莓派 邊緣端 (Edge Sensor Node) 啟動步驟
 
-在 Raspberry Pi 5 上執行以下命令：
+在 Raspberry Pi 5 32-bit (或 64-bit) OS 上，我們提供了一鍵配置與啟動指令：
 
 ```bash
-# 1. 複製設定檔範本
-cp .env.example .env
+# 1. 給予啟動腳本執行權限
+chmod +x start_edge.sh
 
-# 2. 編輯 .env 填入 Server URL 與對應的 API_KEY
-nano .env
+# 2. 執行腳本 (會自動偵測硬體、啟用 SPI/I2C、建立並配置 .env 檔，最後一鍵編譯與啟動 Docker)
+./start_edge.sh
+```
 
-# 3. 使用 Docker Compose 一鍵啟動感測與拍照排程
-docker compose up -d --build
+*(提示：首次啟動後，請確保您的 `.env` 檔案內正確設定了 `DEVICE_ID`、`SERVER_URL` 和 `API_KEY`。)*
 
-# 4. 查看即時運作 Log
-docker compose logs -f edge-sensor
+---
+
+## 🔌 FLIR Lepton 3.X 核心支援與外部專案清理說明
+
+本專案已將外部專案 [`Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera`](./Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera) 的 Lepton 3.X (160x120) 4 分段 VoSPI 影像解析核心技術與拼接演算法，完全移植並重構於本專案的底層驅動中：
+- Native C 驅動：[`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c)
+- Python 相機介面：[`src/sensors/camera_ir.py`](src/sensors/camera_ir.py)
+
+### 🧹 您可以安全刪除外部子目錄
+因為我們已經將 160x120 影像獲取功能直接整合進 Python 容器，**您不需要在樹莓派上編譯運作圖形化的 Qt 串流程式，也不需要 TV 輸出相關的硬體配置**。
+因此，您可以放心地執行以下命令**刪除外部子專案目錄**以保持專案乾淨：
+```bash
+rm -rf Raspberry-Pi-FLIR-Lepton-Thermal-Imaging-Camera
 ```
 
 ---
@@ -56,6 +67,7 @@ docker compose logs -f edge-sensor
 
 本專案檔案標註均採用 **相對路徑**，方便在任何環境下直接參照：
 
+- [`start_edge.sh`](start_edge.sh) — 樹莓派邊緣端一鍵硬體設定與 Docker 啟動腳本。
 - [`src/main.py`](src/main.py) — 樹莓派邊緣端主進程（包含 APScheduler 定時排程與同步任務）。
 - [`src/sensors/camera_ir.py`](src/sensors/camera_ir.py) — FLIR Lepton IR 熱感應相機驅動（正式環境 IR 處理模組）。
 - [`src/sensors/camera_rgb.py`](src/sensors/camera_rgb.py) — 樹莓派官方 RGB 相機驅動（rpicam-still / libcamera-still）。

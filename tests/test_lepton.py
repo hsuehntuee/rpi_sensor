@@ -75,7 +75,7 @@ def test_lepton_vospi_reads_frame_lepton_25(mock_spidev):
     chunk2 = mock_packets[3936:7872]
     chunk3 = mock_packets[7872:9840]
 
-    mock_spi.readbytes.side_effect = cycle([chunk1, chunk2, chunk3])
+    mock_spi.xfer2.side_effect = cycle([chunk1, chunk2, chunk3])
 
     frame = vospi.read_frame()
     assert frame.shape == (60, 80)
@@ -109,7 +109,7 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
         mock_chunks.append(seg_bytes[3936:7872])
         mock_chunks.append(seg_bytes[7872:9840])
 
-    mock_spi.readbytes.side_effect = cycle(mock_chunks)
+    mock_spi.xfer2.side_effect = cycle(mock_chunks)
 
     frame = vospi.read_frame()
     assert frame.shape == (120, 160)

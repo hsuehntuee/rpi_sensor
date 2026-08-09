@@ -247,6 +247,14 @@ class LeptonVoSPI:
         """Read exactly one VoSPI packet (164 bytes)."""
         return self.spi.xfer2([0] * self.PACKET_BYTES)
 
+    def _read_frame_bytes(self) -> bytes:
+        """Read continuous SPI packets for Lepton 3.x segment parser."""
+        chunk_size = 24 * self.PACKET_BYTES
+        chunks = []
+        for _ in range(10):
+            chunks.append(bytes(self.spi.xfer2([0] * chunk_size)))
+        return b"".join(chunks)
+
     def read_frame(self, max_retries: int = 20000) -> np.ndarray:
         if np is None:
             raise ImportError("numpy is required to read Lepton frames")
@@ -263,7 +271,7 @@ class LeptonVoSPI:
                     frame_buf = (ctypes.c_uint16 * (self.width * self.height))()
                     dev_path = f"/dev/spidev{self.spi_bus}.{self.spi_device}".encode("utf-8")
                     self.close()
-                    attempts = c_lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, 5000)
+                    attempts = c_lib.capture_lepton_frame(dev_path, self.spi_speed, frame_buf, self.width, self.height, 5000)
                     if attempts > 0:
                         return np.ctypeslib.as_array(frame_buf).reshape((self.height, self.width)).copy()
 
@@ -522,7 +530,12 @@ def compile_and_load_native_c():
             )
             lib = ctypes.CDLL(str(so_path))
             lib.capture_lepton_frame.argtypes = [
-                ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
+                ctypes.c_char_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint16),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
             ]
             lib.capture_lepton_frame.restype = ctypes.c_int
             return lib
@@ -531,8 +544,66 @@ def compile_and_load_native_c():
     return None
 
 
-def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | None:
+def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80, height: int = 60) -> np.ndarray | None:
     """Capture a 100% clean VoSPI frame using pylepton golden sequential packet algorithm."""
+    if (width * height) > 4800:
+        # Lepton 3.x Python fallback
+        reader.open()
+        t0 = time.time()
+        print("  [pylepton Stream Engine] Synchronizing Lepton 3.x segments 1..4...")
+        segments_data = {}
+        while time.time() - t0 < max_seconds:
+            chunk_size = 24 * 164
+            chunks = []
+            valid = True
+            for _ in range(5):
+                pkt_data = reader.spi.xfer2([0] * chunk_size)
+                if not pkt_data:
+                    valid = False
+                    break
+                chunks.append(bytes(pkt_data))
+            if not valid:
+                continue
+            raw_bytes = b"".join(chunks)
+
+            pos = 0
+            while pos + 9840 <= len(raw_bytes):
+                b0 = raw_bytes[pos]
+                b1 = raw_bytes[pos + 1]
+                if (b0 & 0x0F) != 0x0F and b1 == 0:
+                    seg_valid = True
+                    for r in range(60):
+                        pb0 = raw_bytes[pos + r * 164]
+                        pb1 = raw_bytes[pos + r * 164 + 1]
+                        if (pb0 & 0x0F) == 0x0F or pb1 != r:
+                            seg_valid = False
+                            break
+                    if seg_valid:
+                        seg_id = (raw_bytes[pos + 20 * 164] >> 4) & 0x07
+                        if 1 <= seg_id <= 4:
+                            segment_packets = []
+                            for r in range(60):
+                                payload = raw_bytes[pos + r * 164 + 4 : pos + r * 164 + 164]
+                                segment_packets.append(np.frombuffer(payload, dtype=">u2"))
+                            segments_data[seg_id] = segment_packets
+                    pos += 60 * 164
+                else:
+                    pos += 1
+
+            if len(segments_data) == 4:
+                raw_frame = np.zeros((120, 160), dtype=np.uint16)
+                for seg in range(1, 5):
+                    base_row = (seg - 1) * 30
+                    s_packets = segments_data[seg]
+                    for p_idx in range(60):
+                        row = base_row + (p_idx // 2)
+                        col_off = 80 if (p_idx % 2 == 1) else 0
+                        raw_frame[row, col_off : col_off + 80] = s_packets[p_idx]
+                elapsed = time.time() - t0
+                print(f"  [pylepton Stream Engine] SUCCESS! Captured Lepton 3.x frame in {elapsed:.2f}s!")
+                return raw_frame
+        return None
+
     ROWS = 60
     reader.open()
     t0 = time.time()
@@ -648,7 +719,14 @@ class PiIRCamera(RGBCamera):
             import ctypes
             frame_buf = (ctypes.c_uint16 * (self.vospi.width * self.vospi.height))()
             dev_path = f"/dev/spidev{self.vospi.spi_bus}.{self.vospi.spi_device}".encode("utf-8")
-            attempts = c_lib.capture_lepton_frame(dev_path, self.vospi.spi_speed, frame_buf, 1000)
+            attempts = c_lib.capture_lepton_frame(
+                dev_path,
+                self.vospi.spi_speed,
+                frame_buf,
+                self.vospi.width,
+                self.vospi.height,
+                1000,
+            )
             if attempts > 0:
                 raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
@@ -656,7 +734,7 @@ class PiIRCamera(RGBCamera):
             # Fallback Python reader if C engine fails or is unavailable
             reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
             try:
-                raw_frame = try_capture(reader, max_seconds=15.0)
+                raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
             finally:
                 reader.close()
 

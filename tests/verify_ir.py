@@ -139,7 +139,12 @@ def compile_and_load_native_c():
             )
             lib = ctypes.CDLL(str(so_path))
             lib.capture_lepton_frame.argtypes = [
-                ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16), ctypes.c_int
+                ctypes.c_char_p,
+                ctypes.c_uint32,
+                ctypes.POINTER(ctypes.c_uint16),
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
             ]
             lib.capture_lepton_frame.restype = ctypes.c_int
             return lib
@@ -198,8 +203,66 @@ def find_packet_alignment(buf: bytearray, pkt_size: int = 164, rows: int = 60) -
     return best_offset
 
 
-def try_capture(reader: VoSPIReader, max_seconds: float = 15.0) -> np.ndarray | None:
+def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80, height: int = 60) -> np.ndarray | None:
     """Capture a 100% clean VoSPI frame using pylepton golden sequential packet algorithm."""
+    if (width * height) > 4800:
+        # Lepton 3.x Python fallback
+        reader.open()
+        t0 = time.time()
+        print("  [pylepton Stream Engine] Synchronizing Lepton 3.x segments 1..4...")
+        segments_data = {}
+        while time.time() - t0 < max_seconds:
+            chunk_size = 24 * 164
+            chunks = []
+            valid = True
+            for _ in range(5):
+                pkt_data = reader.spi.xfer2([0] * chunk_size)
+                if not pkt_data:
+                    valid = False
+                    break
+                chunks.append(bytes(pkt_data))
+            if not valid:
+                continue
+            raw_bytes = b"".join(chunks)
+
+            pos = 0
+            while pos + 9840 <= len(raw_bytes):
+                b0 = raw_bytes[pos]
+                b1 = raw_bytes[pos + 1]
+                if (b0 & 0x0F) != 0x0F and b1 == 0:
+                    seg_valid = True
+                    for r in range(60):
+                        pb0 = raw_bytes[pos + r * 164]
+                        pb1 = raw_bytes[pos + r * 164 + 1]
+                        if (pb0 & 0x0F) == 0x0F or pb1 != r:
+                            seg_valid = False
+                            break
+                    if seg_valid:
+                        seg_id = (raw_bytes[pos + 20 * 164] >> 4) & 0x07
+                        if 1 <= seg_id <= 4:
+                            segment_packets = []
+                            for r in range(60):
+                                payload = raw_bytes[pos + r * 164 + 4 : pos + r * 164 + 164]
+                                segment_packets.append(np.frombuffer(payload, dtype=">u2"))
+                            segments_data[seg_id] = segment_packets
+                    pos += 60 * 164
+                else:
+                    pos += 1
+
+            if len(segments_data) == 4:
+                raw_frame = np.zeros((120, 160), dtype=np.uint16)
+                for seg in range(1, 5):
+                    base_row = (seg - 1) * 30
+                    s_packets = segments_data[seg]
+                    for p_idx in range(60):
+                        row = base_row + (p_idx // 2)
+                        col_off = 80 if (p_idx % 2 == 1) else 0
+                        raw_frame[row, col_off : col_off + 80] = s_packets[p_idx]
+                elapsed = time.time() - t0
+                print(f"  [pylepton Stream Engine] SUCCESS! Captured Lepton 3.x frame in {elapsed:.2f}s!")
+                return raw_frame
+        return None
+
     reader.open()
     t0 = time.time()
     print("  [pylepton Stream Engine] Synchronizing and capturing sequential packets 0..59...")
@@ -406,20 +469,20 @@ def main() -> None:
     c_lib = compile_and_load_native_c()
     if c_lib is not None:
         print("  [Native C Engine] Running zero-latency C VoSPI reader...")
-        frame_buf = (ctypes.c_uint16 * (80 * 60))()
+        frame_buf = (ctypes.c_uint16 * (env_width * env_height))()
         dev_path = b"/dev/spidev0.0"
         reader.close()
-        attempts = c_lib.capture_lepton_frame(dev_path, SPI_SPEED, frame_buf, 5000)
+        attempts = c_lib.capture_lepton_frame(dev_path, SPI_SPEED, frame_buf, env_width, env_height, 5000)
         if attempts > 0:
             print(f"  [Native C Engine] SUCCESS! Thermal frame captured in attempt #{attempts}!")
-            frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
+            frame = np.ctypeslib.as_array(frame_buf).reshape((env_height, env_width)).copy()
         else:
             print(f"  [Native C Engine] Result code: {attempts}")
 
     # 2. Python Fallback Scanner if C Engine unavailable
     if frame is None:
         reader.open()
-        frame = try_capture(reader, max_seconds=15.0)
+        frame = try_capture(reader, max_seconds=15.0, width=env_width, height=env_height)
 
     if frame is None:
         print("  [Auto-Recovery] First capture timed out. Sending CCI SYS Reboot (0x0242) to hardware...")
@@ -427,11 +490,11 @@ def main() -> None:
         resync(reader, 0.5)
         print("  [Auto-Recovery] Retrying thermal capture after hardware reboot...")
         if c_lib is not None:
-            attempts = c_lib.capture_lepton_frame(b"/dev/spidev0.0", SPI_SPEED, frame_buf, 5000)
+            attempts = c_lib.capture_lepton_frame(b"/dev/spidev0.0", SPI_SPEED, frame_buf, env_width, env_height, 5000)
             if attempts > 0:
-                frame = np.ctypeslib.as_array(frame_buf).reshape((60, 80)).copy()
+                frame = np.ctypeslib.as_array(frame_buf).reshape((env_height, env_width)).copy()
         if frame is None:
-            frame = try_capture(reader, max_seconds=15.0)
+            frame = try_capture(reader, max_seconds=15.0, width=env_width, height=env_height)
 
     reader.close()
 

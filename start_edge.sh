@@ -18,7 +18,18 @@ fi
 
 # 2. Check if Docker is installed
 if ! command -v docker &>/dev/null; then
-    error "Docker is not installed. Please install Docker first: curl -sSL https://get.docker.com | sh"
+    warn "Docker is not installed on this system."
+    read -p "Would you like to install Docker now automatically? (y/N): " -r yn
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+        log "Installing Docker..."
+        curl -sSL https://get.docker.com | sh
+        log "Adding current user to docker group..."
+        sudo usermod -aG docker "$USER"
+        log "Docker installed successfully!"
+        warn "You may need to log out and log back in, or run 'newgrp docker' for group changes to take effect."
+    else
+        error "Docker is required to run the services. Exiting."
+    fi
 fi
 
 # 3. Enable SPI and I2C interfaces (Requires root/sudo privileges)

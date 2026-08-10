@@ -738,6 +738,9 @@ class PiIRCamera(RGBCamera):
             finally:
                 reader.close()
 
+        if raw_frame is None:
+            raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")
+
         clean_frame = raw_frame & 0x3FFF
         h, w = clean_frame.shape
 

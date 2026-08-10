@@ -28,6 +28,8 @@ class Settings:
     scd41_i2c_bus: int
     scd41_poll_seconds: int
     camera_interval_seconds: int
+    sample_interval_minutes: int
+    sample_cron_minute: str
     rgb_camera_index: int
     lepton_spi_bus: int
     lepton_spi_device: int
@@ -63,6 +65,14 @@ def load_settings(env_file: str | None = None) -> Settings:
     if raw_img_dir and not raw_img_dir.startswith("/"):
         raw_img_dir = "/" + raw_img_dir
 
+    sample_interval_minutes = _int("SAMPLE_INTERVAL_MINUTES", "5")
+    if sample_interval_minutes < 1:
+        sample_interval_minutes = 5
+
+    sample_cron_minute = os.getenv("SAMPLE_CRON_MINUTE", f"*/{sample_interval_minutes}").strip()
+    if not sample_cron_minute:
+        sample_cron_minute = f"*/{sample_interval_minutes}"
+
     settings = Settings(
         device_id=device_id,
         server_url=server_url,
@@ -72,8 +82,10 @@ def load_settings(env_file: str | None = None) -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "10")),
         scd41_i2c_bus=_int("SCD41_I2C_BUS", "2"),
-        scd41_poll_seconds=_int("SCD41_POLL_SECONDS", "1"),
-        camera_interval_seconds=_int("CAMERA_INTERVAL_SECONDS", "10"),
+        scd41_poll_seconds=_int("SCD41_POLL_SECONDS", "300"),
+        camera_interval_seconds=_int("CAMERA_INTERVAL_SECONDS", "300"),
+        sample_interval_minutes=sample_interval_minutes,
+        sample_cron_minute=sample_cron_minute,
         rgb_camera_index=_int("RGB_CAMERA_INDEX", "0"),
         lepton_spi_bus=_int("LEPTON_SPI_BUS", "0"),
         lepton_spi_device=_int("LEPTON_SPI_DEVICE", "0"),

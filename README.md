@@ -97,3 +97,35 @@ docker compose run --entrypoint "python -m pytest" edge-sensor
 # 執行 FLIR Lepton IR 獨立硬體驗證黃金腳本
 docker compose run --entrypoint "python tests/verify_ir.py" edge-sensor
 ```
+
+---
+
+## 🔍 Server 端即時檢視資料庫 (DB) 與照片 (RGB & IR) 指令
+
+在遠端 Server 主機上，您可以使用以下 3 種方式快速檢視已上傳的數據與照片：
+
+### 1. 一鍵快速檢視腳本 (終端機輸出)
+```bash
+cd server
+./inspect.sh
+```
+
+### 2. 瀏覽器即時視覺化儀表板 (Web Dashboard)
+打開瀏覽器訪問：
+👉 **`http://<SERVER_IP>:8000/dashboard`**
+- 即時查看 SCD41 溫濕度/CO2 與 HVAC 數據
+- **RGB 與 FLIR Lepton IR 熱感應雙相機最新照片左右並列對照展示**（點擊即可全螢幕放大查看）
+- 歷史上傳相片藝廊與資料表瀏覽
+
+### 3. 單行資料庫查詢指令
+```bash
+# 查看最新 10 筆環境感測數據 (SCD41)
+docker compose -f server/compose.yaml exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, temperature, humidity, co2_ppm FROM env_metrics ORDER BY timestamp DESC LIMIT 10;"
+
+# 查看最新 10 筆相機照片上傳紀錄 (RGB & IR)
+docker compose -f server/compose.yaml exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, image_type, file_path, size_bytes FROM camera_logs ORDER BY timestamp DESC LIMIT 10;"
+
+# 查看磁碟實體照片檔案
+ls -lht server/storage/images/* | head -n 10
+```
+

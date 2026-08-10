@@ -171,22 +171,26 @@ def build_scheduler(
     sync_task: Callable[[], None],
 ) -> BlockingScheduler:
     scheduler = BlockingScheduler(timezone="UTC")
+    # 準時整點排程 (Cron Trigger)：以標準時間的每 5 分鐘整點（如 10:00, 10:05, 10:10...）取樣一次
     scheduler.add_job(
         guarded("sensor", sensor_task),
-        "interval",
-        seconds=settings.scd41_poll_seconds,
+        "cron",
+        minute=settings.sample_cron_minute,
+        second=0,
         id="sensor",
         max_instances=1,
         coalesce=True,
     )
     scheduler.add_job(
         guarded("camera", camera_task),
-        "interval",
-        seconds=settings.camera_interval_seconds,
+        "cron",
+        minute=settings.sample_cron_minute,
+        second=0,
         id="camera",
         max_instances=1,
         coalesce=True,
     )
+    # 同步任務：每 30 秒自動將本地 SQLite 數據與照片同步上傳至 Server
     scheduler.add_job(
         guarded("sync", sync_task),
         "interval",
@@ -375,7 +379,8 @@ def main() -> None:
         except (ValueError, OSError):
             pass
 
-    # Execute initial sync & camera capture immediately on startup
+    # Execute initial test capture & sync immediately on startup
+    guarded("initial_sensor", sensor_task)()
     guarded("initial_camera", camera_task)()
     guarded("initial_sync", sync_task)()
 

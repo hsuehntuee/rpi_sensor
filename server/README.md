@@ -117,6 +117,90 @@ curl http://192.168.1.20:8000/health
 - `image_type`：`RGB` 或 `IR`
 - `image`：檔案
 
+## 🔍 快速檢視資料庫 (DB) 與圖片 (RGB & IR) 指令
+
+我們提供 3 種快速檢視伺服器資料庫與照片的方法：
+
+### 方法 1: 一鍵終端機快速檢視腳本 (推薦)
+
+在 server 目錄下直接執行：
+
+```bash
+chmod +x inspect.sh
+./inspect.sh
+```
+
+此腳本會自動輸出：
+1. 資料庫各表（環境數據、HVAC、RGB照片、IR照片）筆數與最新時間
+2. 最新 5 筆 SCD41 溫濕度 & CO2 數據
+3. 最新 5 筆 HVAC 狀態與耗電功率
+4. 最新 5 筆 RGB 與 FLIR Lepton IR 照片紀錄
+5. 實體硬碟 `storage/images` 照片檔案列表與容量
+
+---
+
+### 方法 2: 瀏覽器即時視覺化儀表板 (Web Dashboard)
+
+在任何電腦或手機瀏覽器直接輸入伺服器網址：
+
+👉 **`http://<伺服器IP>:8000/dashboard`** （或直接開 `http://<伺服器IP>:8000/`）
+
+- 📊 **即時數值卡片**：溫度、濕度、CO2 濃度、冷氣狀態與功率。
+- 📷 **最新雙相機照片並排展示**：RGB 可見光與 FLIR Lepton IR 熱影像左右並列對照，點擊可放大預覽。
+- 📋 **最新歷史資料表**：SCD41 數據、HVAC 數據。
+- 🖼️ **歷史相片藝廊**：可查看所有歷史 RGB 與 IR 拍攝縮圖。
+- 🔄 **自動每 15 秒重新整理**。
+
+---
+
+### 方法 3: 常用單行 SQL & Terminal 指令
+
+#### 1. 查看環境指標 (SCD41 溫度、濕度、CO2 最新 10 筆)：
+```bash
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, temperature, humidity, co2_ppm FROM env_metrics ORDER BY timestamp DESC LIMIT 10;"
+```
+
+#### 2. 查看 HVAC 冷氣狀態與功率最新 10 筆：
+```bash
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, hvac_state, power_w FROM hvac_status ORDER BY timestamp DESC LIMIT 10;"
+```
+
+#### 3. 查看雙相機 (RGB / IR) 照片上傳紀錄：
+```bash
+# 查看所有最新上傳照片
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, image_type, file_path, size_bytes FROM camera_logs ORDER BY timestamp DESC LIMIT 10;"
+
+# 只看 IR 熱影像照片
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, file_path FROM camera_logs WHERE image_type = 'IR' ORDER BY timestamp DESC LIMIT 5;"
+
+# 只看 RGB 可見光照片
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, file_path FROM camera_logs WHERE image_type = 'RGB' ORDER BY timestamp DESC LIMIT 5;"
+```
+
+#### 4. 統計各表總筆數與最新記錄時間：
+```bash
+docker compose exec db psql -U rpi_sensor -d rpi_sensor -c "
+SELECT 'env_metrics' AS table_name, COUNT(*) AS count, MAX(timestamp) AS latest_time FROM env_metrics
+UNION ALL
+SELECT 'hvac_status', COUNT(*), MAX(timestamp) FROM hvac_status
+UNION ALL
+SELECT 'camera_logs (RGB)', COUNT(*), MAX(timestamp) FROM camera_logs WHERE image_type = 'RGB'
+UNION ALL
+SELECT 'camera_logs (IR)', COUNT(*), MAX(timestamp) FROM camera_logs WHERE image_type = 'IR';
+"
+```
+
+#### 5. 查看伺服器實體硬碟存儲的圖片檔案：
+```bash
+# 列出最近上傳的圖片檔案
+ls -lht storage/images/* | head -n 15
+
+# 或透過 API 查看圖片 JSON 列表
+curl -s http://127.0.0.1:8000/api/v1/images/list
+```
+
+---
+
 ## 維護
 
 更新：
@@ -127,7 +211,7 @@ cd server
 docker compose up -d --build
 ```
 
-查看資料庫：
+查看資料庫互動式 Shell：
 
 ```bash
 docker compose exec db psql -U rpi_sensor -d rpi_sensor

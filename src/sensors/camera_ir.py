@@ -731,10 +731,16 @@ class PiIRCamera(RGBCamera):
                 raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
         if raw_frame is None:
-            # Fallback Python reader if C engine fails or is unavailable
+            # Fallback Python reader matching verify_ir.py exactly
             reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
             try:
+                resync_reader(reader, 0.5)
                 raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
+                if raw_frame is None:
+                    # Auto-recovery matching verify_ir.py: CCI Reboot + Resync + Retry
+                    send_lepton_reboot_command(bus_number=1, address=0x2A)
+                    resync_reader(reader, 0.5)
+                    raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
             finally:
                 reader.close()
 

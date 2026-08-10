@@ -26,6 +26,14 @@ class RGBCamera:
             f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{self.image_type}.jpg"
         )
         self.capture_impl(path)
+        if path.is_file() and path.stat().st_size > 0:
+            try:
+                from PIL import Image, ImageOps
+                with Image.open(path) as img:
+                    mirrored = ImageOps.mirror(img)
+                    mirrored.save(path, quality=95)
+            except Exception:
+                pass
         return path
 
 

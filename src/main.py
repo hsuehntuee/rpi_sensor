@@ -358,10 +358,59 @@ def main() -> None:
         sync_task=sync_task,
     )
     stop_once = threading.Event()
+    web_server = None
+
+    if settings.edge_web_enabled:
+        try:
+            import uvicorn
+            from src.web.app import create_edge_app
+
+            def _manual_capture_callback() -> None:
+                LOGGER.info("[Web Action] Triggered manual camera capture")
+                guarded("manual_camera", camera_task)()
+
+            def _manual_sync_callback() -> int:
+                LOGGER.info("[Web Action] Triggered manual server sync")
+                return sync.sync_all()
+
+            hardware_info = {
+                "scd41": "Hardware Active" if not isinstance(scd41_sensor, DummySCD41) else "Standalone / Emulated",
+                "camera_rgb": "PiCamera Active" if not isinstance(rgb_camera, DummyCamera) else "Standalone / Emulated",
+                "camera_ir": "FLIR Lepton Active" if not isinstance(ir_camera, DummyCamera) else "Standalone / Emulated",
+                "hvac_modbus": "Modbus Connected" if hvac_control is not None else "Disabled",
+            }
+
+            web_app = create_edge_app(
+                settings=settings,
+                database=database,
+                capture_callback=_manual_capture_callback,
+                sync_callback=_manual_sync_callback,
+                hardware_status=hardware_info,
+            )
+
+            config = uvicorn.Config(
+                app=web_app,
+                host=settings.edge_web_host,
+                port=settings.edge_web_port,
+                log_level="warning",
+                access_log=False,
+            )
+            web_server = uvicorn.Server(config)
+
+            def _run_web() -> None:
+                LOGGER.info("🚀 Starting Edge Local Dashboard on http://%s:%d/dashboard", settings.edge_web_host, settings.edge_web_port)
+                web_server.run()
+
+            web_thread = threading.Thread(target=_run_web, daemon=True, name="edge_web_server")
+            web_thread.start()
+        except Exception as exc:
+            LOGGER.warning("Could not start Edge Web Dashboard: %s", exc)
 
     def shutdown(*_: object) -> None:
         if not stop_once.is_set():
             stop_once.set()
+            if web_server is not None:
+                web_server.should_exit = True
             scheduler.shutdown(wait=False)
 
     def trigger_instant_snap(*_: object) -> None:

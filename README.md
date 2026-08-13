@@ -100,22 +100,47 @@ docker compose run --entrypoint "python tests/verify_ir.py" edge-sensor
 
 ---
 
+## 🍓 樹莓派邊緣端即時視覺化儀表板 (Edge Local Web Dashboard)
+
+現在樹莓派 5 邊緣節點已內建專屬的 **本地即時 Web 儀表板**！在與樹莓派處於同一個區網 (WiFi / 乙太網路) 的任何電腦、手機或平板瀏覽器直接打開：
+
+👉 **`http://<樹莓派IP>:8080/dashboard`** （或樹莓派本機 `http://localhost:8080/dashboard`）
+
+### 🌟 邊緣端專屬功能特色：
+1. **即時雙相機畫面並排展示 (Dual Camera Live)**：
+   - 🟢 **RGB 可見光相機 (PiCamera)** 最新拍攝畫面。
+   - 🔴 **FLIR Lepton IR 熱影像 (Lepton 3.X)** 最新偽彩色熱感應畫面。
+   - 點擊任一照片即可開啟 Lightbox 燈箱全螢幕放大查看與下載。
+2. **SCD41 溫濕度 & CO2 即時監測**：
+   - 即時溫度、相對濕度、CO2 濃度，以及空氣品質通風警示。
+3. **HVAC 冷氣狀態與功率**：
+   - 即時運轉狀態 (ON/OFF) 與即時耗電瓦數 (W)。
+4. **邊緣端專屬隊列監控 (Sync Queue)**：
+   - 即時顯示本地 SQLite 資料庫總筆數與待同步上傳至 Server 的排隊筆數。
+5. **⚡ 網頁即時互動控制台 (Edge Actions)**：
+   - 📸 **「立即拍照與同步」**：一鍵手動命令雙相機立即拍攝並自動上傳 Server（免等 5 分鐘排程！）。
+   - 📡 **「立即同步至 Server」**：手動清空待傳隊列，立即與遠端 Server 同步。
+   - 🔄 **自動每 15 秒重新整理** / 手動刷新開關。
+6. **本地相片藝廊 (Local Photo Gallery)**：
+   - 直接檢視與篩選儲存在樹莓派 `/data/images` 中的所有歷史 RGB 與 IR 相片縮圖。
+
+---
+
 ## 🔍 Server 端即時檢視資料庫 (DB) 與照片 (RGB & IR) 指令
 
 在遠端 Server 主機上，您可以使用以下 3 種方式快速檢視已上傳的數據與照片：
 
-### 1. 一鍵快速檢視腳本 (終端機輸出)
+### 1. 瀏覽器即時視覺化儀表板 (Server Web Dashboard)
+打開瀏覽器訪問：
+👉 **`http://<SERVER_IP>:8000/dashboard`**
+- 彙整由邊緣節點同步至 PostgreSQL 的完整歷史數據與照片。
+- 最新雙相機照片對照與歷史藝廊。
+
+### 2. 一鍵快速檢視腳本 (終端機輸出)
 ```bash
 cd server
 ./inspect.sh
 ```
-
-### 2. 瀏覽器即時視覺化儀表板 (Web Dashboard)
-打開瀏覽器訪問：
-👉 **`http://<SERVER_IP>:8000/dashboard`**
-- 即時查看 SCD41 溫濕度/CO2 與 HVAC 數據
-- **RGB 與 FLIR Lepton IR 熱感應雙相機最新照片左右並列對照展示**（點擊即可全螢幕放大查看）
-- 歷史上傳相片藝廊與資料表瀏覽
 
 ### 3. 單行資料庫查詢指令
 ```bash

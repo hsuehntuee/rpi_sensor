@@ -16,6 +16,13 @@ def _int(name: str, default: str) -> int:
     return int(os.getenv(name, default), 0)
 
 
+def _bool(name: str, default: bool) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on", "t"}
+
+
 @dataclass(frozen=True)
 class Settings:
     device_id: str
@@ -44,6 +51,9 @@ class Settings:
     modbus_state_register: int | None
     modbus_control_register: int | None
     modbus_power_register: int | None
+    edge_web_enabled: bool
+    edge_web_host: str
+    edge_web_port: int
 
 
 def load_settings(env_file: str | None = None) -> Settings:
@@ -100,6 +110,9 @@ def load_settings(env_file: str | None = None) -> Settings:
         modbus_state_register=_optional_int("MODBUS_STATE_REGISTER"),
         modbus_control_register=_optional_int("MODBUS_CONTROL_REGISTER"),
         modbus_power_register=_optional_int("MODBUS_POWER_REGISTER"),
+        edge_web_enabled=_bool("EDGE_WEB_ENABLED", True),
+        edge_web_host=os.getenv("EDGE_WEB_HOST", "0.0.0.0").strip(),
+        edge_web_port=_int("EDGE_WEB_PORT", "8080"),
     )
     if settings.scd41_poll_seconds < 1:
         raise ValueError("SCD41_POLL_SECONDS must be at least 1")

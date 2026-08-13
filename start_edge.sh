@@ -55,24 +55,54 @@ fi
 # 5. Build and run containers
 log "Building and starting containerized services..."
 
+# Get local IP address for easy dashboard access
+IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+if [[ -z "$IP_ADDR" ]]; then
+    IP_ADDR="127.0.0.1"
+fi
+
 if command -v docker-compose &>/dev/null && ! command -v docker &>/dev/null; then
     docker-compose up --build -d
-    log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+    log "Startup successful!"
+    printf "\n\033[1;36m======================================================================\033[0m\n"
+    printf "\033[1;32m🍓 樹莓派邊緣節點 (Edge Sensor Node) 已成功在背景啟動！\033[0m\n"
+    printf "\033[1;33m👉 樹莓派內網即時儀表板 (Edge Local Dashboard)：\033[0m\n"
+    printf "   \033[1;37mhttp://%s:8080/dashboard\033[0m\n" "$IP_ADDR"
+    printf "   (或在 Pi 本機瀏覽器打開: \033[1;37mhttp://127.0.0.1:8080/dashboard\033[0m)\n"
+    printf "\033[1;36m======================================================================\033[0m\n\n"
     docker-compose logs -f edge-sensor
 else
     if docker info &>/dev/null; then
         docker compose up --build -d
-        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        log "Startup successful!"
+        printf "\n\033[1;36m======================================================================\033[0m\n"
+        printf "\033[1;32m🍓 樹莓派邊緣節點 (Edge Sensor Node) 已成功在背景啟動！\033[0m\n"
+        printf "\033[1;33m👉 樹莓派內網即時儀表板 (Edge Local Dashboard)：\033[0m\n"
+        printf "   \033[1;37mhttp://%s:8080/dashboard\033[0m\n" "$IP_ADDR"
+        printf "   (或在 Pi 本機瀏覽器打開: \033[1;37mhttp://127.0.0.1:8080/dashboard\033[0m)\n"
+        printf "\033[1;36m======================================================================\033[0m\n\n"
         docker compose logs -f edge-sensor
     elif sg docker -c "docker info" &>/dev/null; then
         log "Running docker compose under 'docker' group..."
         sg docker -c "docker compose up --build -d"
-        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        log "Startup successful!"
+        printf "\n\033[1;36m======================================================================\033[0m\n"
+        printf "\033[1;32m🍓 樹莓派邊緣節點 (Edge Sensor Node) 已成功在背景啟動！\033[0m\n"
+        printf "\033[1;33m👉 樹莓派內網即時儀表板 (Edge Local Dashboard)：\033[0m\n"
+        printf "   \033[1;37mhttp://%s:8080/dashboard\033[0m\n" "$IP_ADDR"
+        printf "   (或在 Pi 本機瀏覽器打開: \033[1;37mhttp://127.0.0.1:8080/dashboard\033[0m)\n"
+        printf "\033[1;36m======================================================================\033[0m\n\n"
         sg docker -c "docker compose logs -f edge-sensor"
     else
         warn "Permission to docker socket denied. Running with sudo..."
         sudo docker compose up --build -d
-        log "Startup successful! Displaying logs from the edge-sensor service (Ctrl+C to exit)..."
+        log "Startup successful!"
+        printf "\n\033[1;36m======================================================================\033[0m\n"
+        printf "\033[1;32m🍓 樹莓派邊緣節點 (Edge Sensor Node) 已成功在背景啟動！\033[0m\n"
+        printf "\033[1;33m👉 樹莓派內網即時儀表板 (Edge Local Dashboard)：\033[0m\n"
+        printf "   \033[1;37mhttp://%s:8080/dashboard\033[0m\n" "$IP_ADDR"
+        printf "   (或在 Pi 本機瀏覽器打開: \033[1;37mhttp://127.0.0.1:8080/dashboard\033[0m)\n"
+        printf "\033[1;36m======================================================================\033[0m\n\n"
         sudo docker compose logs -f edge-sensor
     fi
 fi

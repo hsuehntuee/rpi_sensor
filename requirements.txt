@@ -9,4 +9,6 @@ spidev==3.6
 Pillow==10.4.0
 numpy==1.26.4
 pytest==8.3.3
+fastapi==0.115.0
+uvicorn==0.30.6
 

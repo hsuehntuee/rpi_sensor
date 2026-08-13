@@ -15,3 +15,5 @@ services:
       - /dev/i2c-2:/dev/i2c-2
       - /dev/spidev0.0:/dev/spidev0.0
 #      - /dev/ttyUSB0:/dev/ttyUSB0
+    ports:
+      - "8080:8080"

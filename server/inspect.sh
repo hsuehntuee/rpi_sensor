@@ -25,36 +25,36 @@ else
     exit 1
 fi
 
-echo -e "\n${BLUE}📊 [1] 資料庫各資料表記錄總數與最新時間：${NC}"
+echo -e "\n${BLUE}📊 [1] 資料庫各資料表記錄總數與最新時間 (GMT+8 台北時間)：${NC}"
 $COMPOSE_CMD exec -T db psql -U rpi_sensor -d rpi_sensor -c "
 SELECT 
     'env_metrics (環境感測)' AS table_name, 
     COUNT(*) AS total_records, 
-    COALESCE(TO_CHAR(MAX(timestamp), 'YYYY-MM-DD HH24:MI:SS UTC'), '無資料') AS latest_record
+    COALESCE(TO_CHAR(MAX(timestamp AT TIME ZONE 'Asia/Taipei'), 'YYYY-MM-DD HH24:MI:SS (GMT+8)'), '無資料') AS latest_record
 FROM env_metrics
 UNION ALL
 SELECT 
     'hvac_status (冷氣能耗)', 
     COUNT(*), 
-    COALESCE(TO_CHAR(MAX(timestamp), 'YYYY-MM-DD HH24:MI:SS UTC'), '無資料')
+    COALESCE(TO_CHAR(MAX(timestamp AT TIME ZONE 'Asia/Taipei'), 'YYYY-MM-DD HH24:MI:SS (GMT+8)'), '無資料')
 FROM hvac_status
 UNION ALL
 SELECT 
     'camera_logs (RGB 可見光)', 
     COUNT(*), 
-    COALESCE(TO_CHAR(MAX(timestamp), 'YYYY-MM-DD HH24:MI:SS UTC'), '無資料')
+    COALESCE(TO_CHAR(MAX(timestamp AT TIME ZONE 'Asia/Taipei'), 'YYYY-MM-DD HH24:MI:SS (GMT+8)'), '無資料')
 FROM camera_logs WHERE image_type = 'RGB'
 UNION ALL
 SELECT 
     'camera_logs (IR 熱影像)', 
     COUNT(*), 
-    COALESCE(TO_CHAR(MAX(timestamp), 'YYYY-MM-DD HH24:MI:SS UTC'), '無資料')
+    COALESCE(TO_CHAR(MAX(timestamp AT TIME ZONE 'Asia/Taipei'), 'YYYY-MM-DD HH24:MI:SS (GMT+8)'), '無資料')
 FROM camera_logs WHERE image_type = 'IR';
 " || true
 
-echo -e "\n${BLUE}🌡️ [2] 最新 5 筆 SCD41 環境數據 (溫度 / 濕度 / CO2)：${NC}"
+echo -e "\n${BLUE}🌡️ [2] 最新 5 筆 SCD41 環境數據 (溫度 / 濕度 / CO2) (GMT+8 台北時間)：${NC}"
 $COMPOSE_CMD exec -T db psql -U rpi_sensor -d rpi_sensor -c "
-SELECT id, device_id, TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS time, 
+SELECT id, device_id, TO_CHAR(timestamp AT TIME ZONE 'Asia/Taipei', 'YYYY-MM-DD HH24:MI:SS (GMT+8)') AS time, 
        ROUND(temperature::numeric, 2) AS temp_c, 
        ROUND(humidity::numeric, 2) AS hum_pct, 
        co2_ppm 
@@ -63,9 +63,9 @@ ORDER BY timestamp DESC
 LIMIT 5;
 " || true
 
-echo -e "\n${BLUE}❄️ [3] 最新 5 筆 HVAC 冷氣狀態紀錄：${NC}"
+echo -e "\n${BLUE}❄️ [3] 最新 5 筆 HVAC 冷氣狀態紀錄 (GMT+8 台北時間)：${NC}"
 $COMPOSE_CMD exec -T db psql -U rpi_sensor -d rpi_sensor -c "
-SELECT id, device_id, TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS time, 
+SELECT id, device_id, TO_CHAR(timestamp AT TIME ZONE 'Asia/Taipei', 'YYYY-MM-DD HH24:MI:SS (GMT+8)') AS time, 
        hvac_state, 
        power_w 
 FROM hvac_status 
@@ -73,9 +73,9 @@ ORDER BY timestamp DESC
 LIMIT 5;
 " || true
 
-echo -e "\n${BLUE}📸 [4] 最新 5 筆 RGB 與 IR 相機照片上傳紀錄：${NC}"
+echo -e "\n${BLUE}📸 [4] 最新 10 筆 RGB 與 IR 相機照片上傳紀錄 (GMT+8 台北時間)：${NC}"
 $COMPOSE_CMD exec -T db psql -U rpi_sensor -d rpi_sensor -c "
-SELECT id, device_id, TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS') AS time, 
+SELECT id, device_id, TO_CHAR(timestamp AT TIME ZONE 'Asia/Taipei', 'YYYY-MM-DD HH24:MI:SS (GMT+8)') AS time, 
        image_type, 
        ROUND((size_bytes / 1024.0)::numeric, 1) || ' KB' AS size,
        file_path 

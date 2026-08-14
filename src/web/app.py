@@ -616,6 +616,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                     <h1>樹莓派 5 邊緣節點即時儀表板 <span style="font-size: 0.85rem; color: var(--accent-rpi); font-weight: 600;">(Edge Local)</span></h1>
                     <div class="badges-row">
                         <span class="badge badge-live">節點運行中</span>
+                        <span class="badge" style="background:rgba(56,189,248,0.15); color:var(--accent-cyan); font-family:'JetBrains Mono',monospace;">台北時間 (GMT+8)</span>
                         <span class="badge badge-dev" id="badgeDeviceId">Device: rpi_edge</span>
                         <span class="badge badge-server" id="badgeServerUrl">Server: Connecting...</span>
                         <span style="font-size: 0.78rem; color: var(--text-dim); margin-left: 4px;" id="lastUpdated">更新中...</span>
@@ -683,7 +684,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
             <div class="section-title">
                 <span>📷 本地最新雙相機拍攝畫面 (RGB & FLIR Lepton IR 熱影像)</span>
             </div>
-            <span style="font-size: 0.82rem; color: var(--text-dim);">每 <span id="sampleIntervalText">5</span> 分鐘排程取樣或點擊「立即拍照」</span>
+            <span style="font-size: 0.82rem; color: var(--text-dim);">每 <span id="sampleIntervalText">5</span> 分鐘排程取樣 | 顯示時間為 <strong>GMT+8 台北時間</strong></span>
         </div>
 
         <div class="camera-grid">
@@ -694,10 +695,16 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                     <span class="camera-meta" id="rgbTime">--</span>
                 </div>
                 <div class="camera-img-box" id="rgbImgBox">
-                    <img id="rgbImg" src="" alt="尚無 RGB 影像" style="display:none;" onclick="openModal(this.src, '🟢 RGB 可見光相機畫面')">
+                    <img id="rgbImg" src="" alt="RGB 影像" style="display:none;" onerror="handleImageError('rgb')" onclick="openModal(this.src, '🟢 RGB 可見光相機畫面')">
                     <div id="rgbPlaceholder" class="camera-empty-placeholder">
                         <span style="font-size:2.5rem;">📷</span>
                         <span>等待 RGB 拍攝取樣...</span>
+                    </div>
+                    <div id="rgbErrorCard" class="camera-error-box" style="display:none; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:16px; text-align:center;">
+                        <span style="font-size:2rem;">⚠️</span>
+                        <div style="font-weight:700; color:var(--accent-rose); font-size:0.9rem;">RGB 照片讀取失敗 (檔案未生成或損毀)</div>
+                        <div id="rgbErrorDetail" style="font-size:0.75rem; color:var(--text-muted); max-width:85%; word-break:break-all;"></div>
+                        <button class="btn btn-outline" style="padding:4px 10px; font-size:0.75rem; margin-top:4px;" onclick="triggerInstantCapture()">📸 重新拍照</button>
                     </div>
                 </div>
                 <div class="camera-footer">
@@ -716,10 +723,16 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                     <span class="camera-meta" id="irTime">--</span>
                 </div>
                 <div class="camera-img-box" id="irImgBox">
-                    <img id="irImg" src="" alt="尚無 IR 影像" style="display:none;" onclick="openModal(this.src, '🔴 FLIR Lepton IR 熱感應畫面')">
+                    <img id="irImg" src="" alt="IR 影像" style="display:none;" onerror="handleImageError('ir')" onclick="openModal(this.src, '🔴 FLIR Lepton IR 熱感應畫面')">
                     <div id="irPlaceholder" class="camera-empty-placeholder">
                         <span style="font-size:2.5rem;">🔥</span>
                         <span>等待 IR 拍攝取樣...</span>
+                    </div>
+                    <div id="irErrorCard" class="camera-error-box" style="display:none; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:16px; text-align:center;">
+                        <span style="font-size:2rem;">⚠️</span>
+                        <div style="font-weight:700; color:var(--accent-rose); font-size:0.9rem;">IR 照片讀取失敗 (檔案未生成或損毀)</div>
+                        <div id="irErrorDetail" style="font-size:0.75rem; color:var(--text-muted); max-width:85%; word-break:break-all;"></div>
+                        <button class="btn btn-outline" style="padding:4px 10px; font-size:0.75rem; margin-top:4px;" onclick="triggerInstantCapture()">📸 重新拍照</button>
                     </div>
                 </div>
                 <div class="camera-footer">
@@ -746,7 +759,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 <thead>
                     <tr>
                         <th>ID</th>
-                        <th>取樣時間</th>
+                        <th>取樣時間 (GMT+8 台北時間)</th>
                         <th>溫度 (°C)</th>
                         <th>濕度 (%)</th>
                         <th>CO2 (ppm)</th>
@@ -765,7 +778,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 <thead>
                     <tr>
                         <th>ID</th>
-                        <th>記錄時間</th>
+                        <th>記錄時間 (GMT+8 台北時間)</th>
                         <th>運轉狀態</th>
                         <th>耗電功率 (W)</th>
                         <th>同步狀態</th>
@@ -924,39 +937,65 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
             }
 
             // Latest RGB Camera Image
+            const rgbImg = document.getElementById('rgbImg');
+            const rgbPh = document.getElementById('rgbPlaceholder');
+            const rgbErr = document.getElementById('rgbErrorCard');
+            const rgbLink = document.getElementById('rgbLink');
+            const rgbSyncTag = document.getElementById('rgbSyncTag');
+
             if (data.latest_rgb_images && data.latest_rgb_images.length > 0) {
                 const rgb = data.latest_rgb_images[0];
-                const rgbImg = document.getElementById('rgbImg');
-                rgbImg.src = rgb.url + '?t=' + Date.now();
+                rgbErr.style.display = 'none';
+                rgbPh.style.display = 'none';
                 rgbImg.style.display = 'block';
-                document.getElementById('rgbPlaceholder').style.display = 'none';
-                document.getElementById('rgbLink').href = rgb.url;
-                document.getElementById('rgbLink').style.display = 'inline';
+                rgbImg.src = rgb.url + '?t=' + Date.now();
+                rgbLink.href = rgb.url;
+                rgbLink.style.display = 'inline';
                 document.getElementById('rgbTime').textContent = formatTime(rgb.timestamp);
                 document.getElementById('rgbSize').textContent = `大小: ${(rgb.size_bytes / 1024).toFixed(1)} KB`;
                 
-                const syncTag = document.getElementById('rgbSyncTag');
-                syncTag.style.display = 'inline-block';
-                syncTag.className = rgb.is_synced ? 'sync-tag synced' : 'sync-tag pending';
-                syncTag.textContent = rgb.is_synced ? '✓ 已同步' : '⏳ 待上傳';
+                rgbSyncTag.style.display = 'inline-block';
+                rgbSyncTag.className = rgb.is_synced ? 'sync-tag synced' : 'sync-tag pending';
+                rgbSyncTag.textContent = rgb.is_synced ? '✓ 已同步' : '⏳ 待上傳';
+            } else {
+                rgbImg.style.display = 'none';
+                rgbErr.style.display = 'none';
+                rgbPh.style.display = 'flex';
+                rgbLink.style.display = 'none';
+                rgbSyncTag.style.display = 'none';
+                document.getElementById('rgbTime').textContent = '--';
+                document.getElementById('rgbSize').textContent = '大小: --';
             }
 
             // Latest IR Camera Image
+            const irImg = document.getElementById('irImg');
+            const irPh = document.getElementById('irPlaceholder');
+            const irErr = document.getElementById('irErrorCard');
+            const irLink = document.getElementById('irLink');
+            const irSyncTag = document.getElementById('irSyncTag');
+
             if (data.latest_ir_images && data.latest_ir_images.length > 0) {
                 const ir = data.latest_ir_images[0];
-                const irImg = document.getElementById('irImg');
-                irImg.src = ir.url + '?t=' + Date.now();
+                irErr.style.display = 'none';
+                irPh.style.display = 'none';
                 irImg.style.display = 'block';
-                document.getElementById('irPlaceholder').style.display = 'none';
-                document.getElementById('irLink').href = ir.url;
-                document.getElementById('irLink').style.display = 'inline';
+                irImg.src = ir.url + '?t=' + Date.now();
+                irLink.href = ir.url;
+                irLink.style.display = 'inline';
                 document.getElementById('irTime').textContent = formatTime(ir.timestamp);
                 document.getElementById('irSize').textContent = `大小: ${(ir.size_bytes / 1024).toFixed(1)} KB`;
 
-                const syncTag = document.getElementById('irSyncTag');
-                syncTag.style.display = 'inline-block';
-                syncTag.className = ir.is_synced ? 'sync-tag synced' : 'sync-tag pending';
-                syncTag.textContent = ir.is_synced ? '✓ 已同步' : '⏳ 待上傳';
+                irSyncTag.style.display = 'inline-block';
+                irSyncTag.className = ir.is_synced ? 'sync-tag synced' : 'sync-tag pending';
+                irSyncTag.textContent = ir.is_synced ? '✓ 已同步' : '⏳ 待上傳';
+            } else {
+                irImg.style.display = 'none';
+                irErr.style.display = 'none';
+                irPh.style.display = 'flex';
+                irLink.style.display = 'none';
+                irSyncTag.style.display = 'none';
+                document.getElementById('irTime').textContent = '--';
+                document.getElementById('irSize').textContent = '大小: --';
             }
 
             // Render SCD41 Table
@@ -993,6 +1032,20 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
             }
         }
 
+        function handleImageError(type) {
+            const img = document.getElementById(type + 'Img');
+            const errBox = document.getElementById(type + 'ErrorCard');
+            const errDetail = document.getElementById(type + 'ErrorDetail');
+            const ph = document.getElementById(type + 'Placeholder');
+            if (img) img.style.display = 'none';
+            if (ph) ph.style.display = 'none';
+            if (errBox) {
+                errBox.style.display = 'flex';
+                const cleanSrc = img ? img.src.split('?')[0] : '';
+                errDetail.textContent = `路徑: ${cleanSrc} (請檢查相機排線連接或硬體模組狀態)`;
+            }
+        }
+
         function renderGallery(images, filter = 'ALL') {
             const container = document.getElementById('galleryContainer');
             if (!images || images.length === 0) {
@@ -1014,10 +1067,10 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
 
             container.innerHTML = filtered.map(img => `
                 <div class="gallery-item">
-                    <img src="${img.url}" alt="${img.name}" loading="lazy" onclick="openModal('${img.url}', '${img.type === 'IR' ? '🔴 FLIR Lepton IR 熱影像' : '🟢 RGB 可見光相機'} (${img.name})')">
+                    <img src="${img.url}" alt="${img.name}" loading="lazy" onerror="this.onerror=null; this.style.opacity=0.3; this.title='載入失敗';" onclick="openModal('${img.url}', '${img.type === 'IR' ? '🔴 FLIR Lepton IR 熱影像' : '🟢 RGB 可見光相機'} (${img.name})')">
                     <div class="gallery-meta">
                         <span style="font-weight:700; color:${img.type === 'IR' ? 'var(--accent-rose)' : 'var(--accent-emerald)'};">${img.type === 'IR' ? '🔴 IR' : '🟢 RGB'}</span>
-                        <span>${(img.size_bytes / 1024).toFixed(0)} KB</span>
+                        <span style="font-size:0.7rem; color:var(--text-dim);">${formatTime(img.mtime)}</span>
                     </div>
                 </div>
             `).join('');
@@ -1072,8 +1125,27 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
 
         function formatTime(isoStr) {
             if (!isoStr) return '--';
-            const d = new Date(isoStr);
-            return isNaN(d) ? isoStr : d.toLocaleString('zh-TW', { hour12: false });
+            let s = String(isoStr).trim();
+            if (!s.endsWith('Z') && !s.includes('+') && !s.includes('-')) {
+                s = s.replace(' ', 'T') + 'Z';
+            } else if (s.includes(' ') && !s.includes('T')) {
+                s = s.replace(' ', 'T');
+            }
+            const d = new Date(s);
+            if (isNaN(d.getTime())) return isoStr;
+            
+            // 強制轉換為 GMT+8 (Asia/Taipei)
+            const options = {
+                timeZone: 'Asia/Taipei',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+            };
+            return new Intl.DateTimeFormat('zh-TW', options).format(d) + ' (GMT+8)';
         }
 
         function switchTab(tab, btn) {

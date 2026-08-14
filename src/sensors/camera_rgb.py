@@ -26,14 +26,19 @@ class RGBCamera:
             f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{self.image_type}.jpg"
         )
         self.capture_impl(path)
-        if path.is_file() and path.stat().st_size > 0:
-            try:
-                from PIL import Image, ImageOps
-                with Image.open(path) as img:
-                    mirrored = ImageOps.mirror(img)
-                    mirrored.save(path, quality=95)
-            except Exception:
-                pass
+        if not path.is_file() or path.stat().st_size == 0:
+            path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"{self.image_type.upper()} camera capture failed: output file is missing or 0 bytes. "
+                "Please verify camera ribbon cable connection, CSI port, and 'rpicam-still --list-cameras'."
+            )
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(path) as img:
+                mirrored = ImageOps.mirror(img)
+                mirrored.save(path, quality=95)
+        except Exception:
+            pass
         return path
 
 
@@ -53,26 +58,36 @@ class PiCamera(RGBCamera):
     def _capture(self, path: Path) -> None:
         cmd = shutil.which("rpicam-still") or shutil.which("libcamera-still")
         if cmd:
-            try:
-                self.runner(
-                    [
-                        cmd,
-                        "--camera",
-                        str(self.camera_index),
-                        "--nopreview",
-                        "--timeout",
-                        "1000",
-                        "--output",
-                        str(path),
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=30,
-                )
-                return
-            except Exception:
-                pass
+            # Try configured camera index first, then alternate (0 or 1 on RPi 5 dual CSI)
+            indexes_to_try = [self.camera_index]
+            if self.camera_index in (0, 1):
+                alt = 1 if self.camera_index == 0 else 0
+                if alt not in indexes_to_try:
+                    indexes_to_try.append(alt)
+
+            for idx in indexes_to_try:
+                try:
+                    self.runner(
+                        [
+                            cmd,
+                            "--camera",
+                            str(idx),
+                            "--nopreview",
+                            "--timeout",
+                            "1000",
+                            "--output",
+                            str(path),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=30,
+                    )
+                    if path.is_file() and path.stat().st_size > 0:
+                        return
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         ffmpeg_cmd = shutil.which("ffmpeg")
         if ffmpeg_cmd:
@@ -101,7 +116,9 @@ class PiCamera(RGBCamera):
                             stderr=subprocess.DEVNULL,
                             timeout=10,
                         )
-                        return
+                        if path.is_file() and path.stat().st_size > 0:
+                            return
+                        path.unlink(missing_ok=True)
                     except Exception:
                         pass
 
@@ -122,7 +139,9 @@ class PiCamera(RGBCamera):
                     stderr=subprocess.DEVNULL,
                     timeout=15,
                 )
-                return
+                if path.is_file() and path.stat().st_size > 0:
+                    return
+                path.unlink(missing_ok=True)
             except Exception:
                 pass
 

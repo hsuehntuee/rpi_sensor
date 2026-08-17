@@ -3,6 +3,7 @@ services:
     build: .
     restart: unless-stopped
     privileged: true
+    ipc: host
     env_file: .env
     volumes:
       - ./data:/data
@@ -10,6 +11,7 @@ services:
       - ./tests:/app/tests
       - /dev:/dev
       - /run/udev:/run/udev
+      - /dev/shm:/dev/shm
     devices:
       - /dev/i2c-1:/dev/i2c-1
       - /dev/i2c-2:/dev/i2c-2

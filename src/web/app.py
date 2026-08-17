@@ -1126,7 +1126,9 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
         function formatTime(isoStr) {
             if (!isoStr) return '--';
             let s = String(isoStr).trim();
-            if (!s.endsWith('Z') && !s.includes('+') && !s.includes('-')) {
+            const hasTimezone = s.endsWith('Z') || /[+-]\d{2}(:\d{2})?$/.test(s);
+            if (!hasTimezone) {
+                // SQLite CURRENT_TIMESTAMP is in UTC, ensure 'Z' is appended for proper UTC interpretation
                 s = s.replace(' ', 'T') + 'Z';
             } else if (s.includes(' ') && !s.includes('T')) {
                 s = s.replace(' ', 'T');

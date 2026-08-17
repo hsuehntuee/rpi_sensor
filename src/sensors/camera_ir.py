@@ -212,7 +212,7 @@ class LeptonVoSPI:
         self.height = height
         self.rows_per_read = height if width <= 80 else 60
         self.is_lepton3 = (width * height) > 4800
-        self.spi_speed = 10_000_000   # 10 MHz (Rock-solid 0-bit-error clock for Raspberry Pi 5)
+        self.spi_speed = 16_000_000 if self.is_lepton3 else 10_000_000
         self.spi_mode = 3             # CPOL=1, CPHA=1
         self.spi = None
 

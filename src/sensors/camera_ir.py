@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import struct
 import time
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 from .camera_rgb import RGBCamera
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LeptonDetectionError(RuntimeError):
@@ -548,7 +551,8 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80,
     """Capture a 100% clean VoSPI frame using pylepton golden sequential packet algorithm."""
     if (width * height) > 4800:
         # Lepton 3.x Python fallback
-        reader.open()
+        if reader.spi is None:
+            reader.open()
         t0 = time.time()
         print("  [pylepton Stream Engine] Synchronizing Lepton 3.x segments 1..4...")
         segments_data = {}
@@ -605,7 +609,8 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80,
         return None
 
     ROWS = 60
-    reader.open()
+    if reader.spi is None:
+        reader.open()
     t0 = time.time()
 
     while time.time() - t0 < max_seconds:
@@ -693,11 +698,24 @@ class PiIRCamera(RGBCamera):
         self.colormap = colormap
         self.upscale_factor = upscale_factor
         self.fixed_temp_range = fixed_temp_range
+        self._consecutive_failures = 0
         super().__init__(image_dir, self._capture, image_type="ir")
 
     def _capture(self, path: Path) -> None:
         if np is None or Image is None:
             raise ImportError("numpy and Pillow are required for PiIRCamera")
+
+        # Escalating recovery parameters based on consecutive failure count
+        failures = self._consecutive_failures
+        if failures >= 3:
+            resync_delay = 5.0
+            capture_timeout = 30.0
+        elif failures >= 2:
+            resync_delay = 2.0
+            capture_timeout = 30.0
+        else:
+            resync_delay = 0.5
+            capture_timeout = 15.0
 
         # 1. Probing Lepton CCI status & auto-reboot if BootOK=False (matching verify_ir.py)
         status_reg = read_raw_status(bus_number=1, address=0x2A)
@@ -712,35 +730,58 @@ class PiIRCamera(RGBCamera):
                     if st is not None and bool(st & 0x0004) and not bool(st & 0x0001):
                         break
 
-        # 2. Execute Native C Zero-Latency Engine FIRST (Sub-20ms high performance)
-        raw_frame = None
-        c_lib = compile_and_load_native_c()
-        if c_lib is not None:
-            import ctypes
-            frame_buf = (ctypes.c_uint16 * (self.vospi.width * self.vospi.height))()
-            dev_path = f"/dev/spidev{self.vospi.spi_bus}.{self.vospi.spi_device}".encode("utf-8")
-            attempts = c_lib.capture_lepton_frame(
-                dev_path,
-                self.vospi.spi_speed,
-                frame_buf,
-                self.vospi.width,
-                self.vospi.height,
-                1000,
+        # 1.5 Pre-emptive escalated recovery for persistent failures
+        if failures >= 3:
+            LOGGER.warning(
+                "[IR Recovery] %d consecutive failures — escalated pre-capture recovery: "
+                "CCI reboot + FFC recalibration + %.1fs CS high resync",
+                failures, resync_delay,
             )
-            if attempts > 0:
-                raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
+            send_lepton_reboot_command(bus_number=1, address=0x2A)
+            time.sleep(0.5)
+            send_lepton_ffc_command(bus_number=1, address=0x2A)
+            time.sleep(resync_delay)
+
+        # 2. Execute Native C Zero-Latency Engine FIRST (Sub-20ms high performance)
+        #    Skip C engine after 2+ consecutive failures to avoid wasting ~30s on dead hardware.
+        raw_frame = None
+        if failures < 2:
+            c_lib = compile_and_load_native_c()
+            if c_lib is not None:
+                import ctypes
+                frame_buf = (ctypes.c_uint16 * (self.vospi.width * self.vospi.height))()
+                dev_path = f"/dev/spidev{self.vospi.spi_bus}.{self.vospi.spi_device}".encode("utf-8")
+                attempts = c_lib.capture_lepton_frame(
+                    dev_path,
+                    self.vospi.spi_speed,
+                    frame_buf,
+                    self.vospi.width,
+                    self.vospi.height,
+                    1000,
+                )
+                if attempts > 0:
+                    raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
         if raw_frame is None:
             # Fallback Python reader matching verify_ir.py exactly
             reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
             try:
-                resync_reader(reader, 0.5)
-                raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
+                resync_reader(reader, resync_delay)
+                raw_frame = try_capture(reader, max_seconds=capture_timeout, width=self.vospi.width, height=self.vospi.height)
                 if raw_frame is None:
-                    # Auto-recovery matching verify_ir.py: CCI Reboot + Resync + Retry
+                    # Auto-recovery: CCI Reboot + FFC + Resync + Retry
+                    if failures >= 2:
+                        LOGGER.warning(
+                            "[IR Recovery] First Python capture failed (attempt with %.1fs resync). "
+                            "Escalating: CCI reboot + FFC + %.1fs resync...",
+                            resync_delay, resync_delay,
+                        )
                     send_lepton_reboot_command(bus_number=1, address=0x2A)
-                    resync_reader(reader, 0.5)
-                    raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
+                    if failures >= 2:
+                        time.sleep(0.3)
+                        send_lepton_ffc_command(bus_number=1, address=0x2A)
+                    resync_reader(reader, resync_delay)
+                    raw_frame = try_capture(reader, max_seconds=capture_timeout, width=self.vospi.width, height=self.vospi.height)
             finally:
                 reader.close()
 
@@ -748,7 +789,22 @@ class PiIRCamera(RGBCamera):
         self.vospi.close()
 
         if raw_frame is None:
+            self._consecutive_failures += 1
+            LOGGER.error(
+                "[IR Recovery] Capture failed (%d consecutive failures). "
+                "Next attempt will use %.1fs CS high resync.",
+                self._consecutive_failures,
+                min(5.0, 0.5 * (2 ** min(self._consecutive_failures, 3))),
+            )
             raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")
+
+        # Success — reset consecutive failure counter
+        if self._consecutive_failures > 0:
+            LOGGER.info(
+                "[IR Recovery] Capture recovered after %d consecutive failures!",
+                self._consecutive_failures,
+            )
+        self._consecutive_failures = 0
 
         clean_frame = raw_frame & 0x3FFF
         h, w = clean_frame.shape

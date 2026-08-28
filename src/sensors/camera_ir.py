@@ -769,19 +769,19 @@ class PiIRCamera(RGBCamera):
                 resync_reader(reader, resync_delay)
                 raw_frame = try_capture(reader, max_seconds=capture_timeout, width=self.vospi.width, height=self.vospi.height)
                 if raw_frame is None:
-                    # Auto-recovery: CCI Reboot + FFC + Resync + Retry
-                    if failures >= 2:
-                        LOGGER.warning(
-                            "[IR Recovery] First Python capture failed (attempt with %.1fs resync). "
-                            "Escalating: CCI reboot + FFC + %.1fs resync...",
-                            resync_delay, resync_delay,
-                        )
+                    # Auto-recovery: ALWAYS use strong recovery on first retry
+                    # CCI Reboot + FFC recalibration + 2s minimum CS high resync
+                    retry_resync = max(resync_delay, 2.0)
+                    LOGGER.warning(
+                        "[IR Recovery] First capture failed. "
+                        "Strong recovery: CCI reboot + FFC + %.1fs resync...",
+                        retry_resync,
+                    )
                     send_lepton_reboot_command(bus_number=1, address=0x2A)
-                    if failures >= 2:
-                        time.sleep(0.3)
-                        send_lepton_ffc_command(bus_number=1, address=0x2A)
-                    resync_reader(reader, resync_delay)
-                    raw_frame = try_capture(reader, max_seconds=capture_timeout, width=self.vospi.width, height=self.vospi.height)
+                    time.sleep(0.3)
+                    send_lepton_ffc_command(bus_number=1, address=0x2A)
+                    resync_reader(reader, retry_resync)
+                    raw_frame = try_capture(reader, max_seconds=30.0, width=self.vospi.width, height=self.vospi.height)
             finally:
                 reader.close()
 

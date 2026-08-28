@@ -170,7 +170,7 @@ def build_scheduler(
     camera_task: Callable[[], None],
     sync_task: Callable[[], None],
 ) -> BlockingScheduler:
-    scheduler = BlockingScheduler(timezone="UTC")
+    scheduler = BlockingScheduler(timezone="Asia/Taipei")
     # 準時整點排程 (Cron Trigger)：以標準時間的每 5 分鐘整點（如 10:00, 10:05, 10:10...）取樣一次
     scheduler.add_job(
         guarded("sensor", sensor_task),
@@ -208,6 +208,9 @@ def main() -> None:
         level=getattr(logging, settings.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Suppress APScheduler per-job execution chatter (Running/Executed lines)
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
     database = LocalDatabase(settings.database_path)
     sync = RemoteSync(
         database,
@@ -344,12 +347,25 @@ def main() -> None:
         ir_camera=ir_camera,
     )
 
+    _sync_fail_count = 0
+
     def sync_task() -> None:
+        nonlocal _sync_fail_count
         try:
             count = sync.sync_all()
-            LOGGER.info("RemoteSync executed: %d items synced to %s", count, settings.server_url)
+            if count > 0:
+                if _sync_fail_count > 0:
+                    LOGGER.info("RemoteSync recovered after %d failures", _sync_fail_count)
+                _sync_fail_count = 0
+                LOGGER.info("RemoteSync: %d items synced to %s", count, settings.server_url)
+            elif _sync_fail_count == 0:
+                pass  # server reachable but nothing to sync — silent
         except Exception as exc:
-            LOGGER.warning("RemoteSync encountered sync error: %s (queued for next interval)", exc)
+            _sync_fail_count += 1
+            if _sync_fail_count <= 1:
+                LOGGER.warning("RemoteSync: server unreachable (%s), will retry silently", exc)
+            elif _sync_fail_count % 20 == 0:
+                LOGGER.warning("RemoteSync: still unreachable after %d attempts", _sync_fail_count)
 
     scheduler = build_scheduler(
         settings,

@@ -3,8 +3,19 @@ services:
     build: .
     restart: unless-stopped
     privileged: true
+    pid: host
     ipc: host
+    shm_size: '256m'
     env_file: .env
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - ./data:/data
       - ./src:/app/src
@@ -12,6 +23,7 @@ services:
       - /dev:/dev
       - /run/udev:/run/udev
       - /dev/shm:/dev/shm
+      - /lib/firmware:/lib/firmware:ro
     devices:
       - /dev/i2c-1:/dev/i2c-1
       - /dev/i2c-2:/dev/i2c-2

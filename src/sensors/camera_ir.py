@@ -744,6 +744,9 @@ class PiIRCamera(RGBCamera):
             finally:
                 reader.close()
 
+        # Always ensure our shared vospi SPI handle is released after capture
+        self.vospi.close()
+
         if raw_frame is None:
             raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")
 

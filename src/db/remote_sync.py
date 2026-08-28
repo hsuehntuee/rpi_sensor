@@ -20,7 +20,7 @@ class RemoteSync:
         device_id: str,
         api_key: str,
         timeout: float = 10,
-        session: Any = requests,
+        session: Any = None,
     ) -> None:
         if not server_url.strip():
             raise ValueError("server_url is required")
@@ -30,7 +30,18 @@ class RemoteSync:
         self.device_id = device_id
         self.headers = {"X-API-Key": api_key}
         self.timeout = timeout
-        self.session = session
+        if session is not None:
+            self._owned_session = False
+            self.session = session
+        else:
+            self._owned_session = True
+            self.session = requests.Session()
+            self.session.headers.update(self.headers)
+
+    def close(self) -> None:
+        """Close the owned requests session to release sockets."""
+        if self._owned_session and hasattr(self.session, "close"):
+            self.session.close()
 
     @staticmethod
     def _public(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
@@ -129,5 +140,5 @@ class RemoteSync:
         try:
             return self.sync_metrics(batch_limit=50) + self.sync_images()
         except Exception as exc:
-            LOGGER.warning("RemoteSync network timeout or error: %s (queued in SQLite for next interval)", exc)
+            LOGGER.debug("RemoteSync network error: %s (queued for next interval)", exc)
             return 0

@@ -56,9 +56,40 @@ class PiCamera(RGBCamera):
         super().__init__(image_dir, self._capture)
 
     def _capture(self, path: Path) -> None:
+        # === Strategy 1: nsenter host capture (Docker + pid:host) ===
+        # IMX500 AI camera rpicam-still crashes inside Docker containers
+        # due to missing firmware context. Use nsenter to call the host's
+        # rpicam-still via /dev/shm as shared temp path.
+        if Path("/.dockerenv").exists():
+            shm_temp = Path("/dev/shm/_rpi_rgb_capture.jpg")
+            for host_cmd in ("rpicam-still", "libcamera-still"):
+                try:
+                    self.runner(
+                        [
+                            "nsenter", "--target", "1",
+                            "--mount", "--uts", "--ipc", "--pid", "--",
+                            host_cmd,
+                            "--camera", str(self.camera_index),
+                            "--nopreview",
+                            "--zsl",
+                            "--timeout", "5000",
+                            "--output", str(shm_temp),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=30,
+                    )
+                    if shm_temp.is_file() and shm_temp.stat().st_size > 0:
+                        shutil.move(str(shm_temp), str(path))
+                        return
+                    shm_temp.unlink(missing_ok=True)
+                except Exception:
+                    shm_temp.unlink(missing_ok=True)
+
+        # === Strategy 2: container-local rpicam-still / libcamera-still ===
         cmd = shutil.which("rpicam-still") or shutil.which("libcamera-still")
         if cmd:
-            # Try configured camera index first, then alternate (0 or 1 on RPi 5 dual CSI)
             indexes_to_try = [self.camera_index]
             if self.camera_index in (0, 1):
                 alt = 1 if self.camera_index == 0 else 0
@@ -73,8 +104,9 @@ class PiCamera(RGBCamera):
                             "--camera",
                             str(idx),
                             "--nopreview",
+                            "--zsl",
                             "--timeout",
-                            "1000",
+                            "5000",
                             "--output",
                             str(path),
                         ],
@@ -89,6 +121,7 @@ class PiCamera(RGBCamera):
                 except Exception:
                     pass
 
+        # === Strategy 3: ffmpeg V4L2 fallback ===
         ffmpeg_cmd = shutil.which("ffmpeg")
         if ffmpeg_cmd:
             video_devices = [f"/dev/video{self.camera_index}"] + [
@@ -122,6 +155,7 @@ class PiCamera(RGBCamera):
                     except Exception:
                         pass
 
+        # === Strategy 4: v4l2-ctl fallback ===
         v4l2_cmd = shutil.which("v4l2-ctl")
         video_dev = f"/dev/video{self.camera_index}"
         if v4l2_cmd and Path(video_dev).exists():
@@ -145,18 +179,20 @@ class PiCamera(RGBCamera):
             except Exception:
                 pass
 
-        # Default attempt for rpicam-still to preserve test runner expectations
+        # === Strategy 5: final fallback (raises on failure) ===
         self.runner(
             [
                 "rpicam-still",
                 "--camera",
                 str(self.camera_index),
                 "--nopreview",
+                "--zsl",
                 "--timeout",
-                "1000",
+                "5000",
                 "--output",
                 str(path),
             ],
             check=True,
             timeout=30,
         )
+

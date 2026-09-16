@@ -67,16 +67,19 @@ chmod +x start_edge.sh
 
 ---
 
-## 🎯 FLIR Lepton IR 正式環境對齊驗證說明
+## 🎯 FLIR Lepton IR 長效穩定性與自我恢復機制說明
 
-正式環境的熱感應相機驅動 [`src/sensors/camera_ir.py`](src/sensors/camera_ir.py) 已 **100% 完全遵循黃金標準 [`tests/verify_ir.py`](tests/verify_ir.py)** 進行實作：
+正式環境的熱感應相機驅動 [`src/sensors/camera_ir.py`](src/sensors/camera_ir.py) 具備高可靠度無人值守容錯架構：
 
-1. **CCI 控制與自動軟體 Reboot 重置**：
-   - 拍照前自動透過 I2C 讀取 Status Register (`0x0002`)。
-   - 若檢測到 Lepton 核心處於 `BootOK=False` 或 `Busy` 狀態，會自動發送 `0x0242` 軟體重置命令，確保感測器脫離錯誤鎖死狀態。
-2. **Native C Kernel SPI 驅動引擎**：
-   - 優先使用由 [`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c) 編譯的 100% 零延遲 C 語言 VoSPI 接收引擎。
-   - 當 Native C 引擎不可用時，自動降級為 3-Chunk (3936B, 3936B, 1968B) 的 Python 讀取器與 CS High 200ms 硬體重置機制。
+1. **CCI 控制與真 OEM 軟體 Reboot 自動重置**：
+   - 拍照前讀取 Status Register (`0x0002`)。若檢測到晶片處於 FFC 快門自動校正狀態 (`Busy=1`)，自動優雅等待最多 2.5 秒，避免暴力中斷。
+   - 若檢測到異常或逾時，自動發送真實的 Lepton OEM 軟體重置命令 **`0x4842`** (`LEP_CID_OEM_REBOOT`)，重啟內部 ASIC 並等待重新開機完成 (`BootOK=1`)。
+   - 可選硬體引腳支援：支援配置 `LEPTON_RESET_GPIO`（如接至 Pin 13 / GPIO27），當 I2C 死鎖時自動觸發 50ms 主動低電位硬體冷重置。
+2. **Native C Kernel SPI 單例驅動引擎**：
+   - 使用由 [`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c) 編譯的 100% 零延遲 C 語言 VoSPI 接收引擎。
+   - 驅動採用開機單例快取（Singleton），徹底避免反覆 gcc 編譯與 dlopen 造成的記憶體與動態連結洩漏。
+   - 移除失敗次數鎖定限制，即使遇到偶發干擾也始終維持 C 核心運作，並具備 250ms CS High 脫困時序。
+   - 加入硬體互斥鎖 (`threading.Lock`)，確保定時排程、網頁 Dashboard 即時拍照與外部信號快照不產生資源競爭。
 3. **高動態熱影像後處理 Pipeline**：
    - **14-bit Pixels 遮罩與絕對溫度換算**：使用 `raw & 0x3FFF` 處理，並支援 $T_{\text{Celsius}} = \frac{\text{raw}}{100} - 273.15$。
    - **5% 至 95% Percentile 動態範圍裁切**：自動去除極端噪訊，提升人臉與環境對比度。

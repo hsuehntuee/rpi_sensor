@@ -71,12 +71,20 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool:
-    """Send CCI SYS Reboot command (0x0242) to FLIR Lepton over I2C to reset VoSPI engine."""
+    """Send true OEM software reboot command (0x4842 / LEP_CID_OEM_REBOOT) over CCI I2C."""
     try:
+        from smbus2 import SMBus, i2c_msg
         with SMBus(bus_number) as bus:
-            cmd = 0x0242
-            req = i2c_msg.write(address, [(cmd >> 8) & 0xFF, cmd & 0xFF, 0x00, 0x00])
-            bus.i2c_rdwr(req)
+            # 1. Set data length = 0 words
+            len_msg = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
+            bus.i2c_rdwr(len_msg)
+            time.sleep(0.01)
+
+            # 2. Send OEM Reboot command 0x4842
+            reboot_cmd = 0x4842
+            cmd_msg = i2c_msg.write(address, [0x00, 0x04, (reboot_cmd >> 8) & 0xFF, reboot_cmd & 0xFF])
+            bus.i2c_rdwr(cmd_msg)
+            time.sleep(1.2)  # Wait for ASIC reboot
             return True
     except Exception as exc:
         print(f"  [Diag] CCI reboot command failed: {exc}")
@@ -123,8 +131,15 @@ def resync(reader: VoSPIReader, delay: float = 0.5):
     reader.open()
 
 
+_VERIFY_NATIVE_C_LIB = None
+
+
 def compile_and_load_native_c():
-    """Compile and load native C VoSPI capture shared object inside Docker container."""
+    """Compile and load native C VoSPI capture shared object (cached)."""
+    global _VERIFY_NATIVE_C_LIB
+    if _VERIFY_NATIVE_C_LIB is not None:
+        return _VERIFY_NATIVE_C_LIB
+
     c_path = Path("/app/src/sensors/lepton_capture.c")
     if not c_path.exists():
         c_path = Path("src/sensors/lepton_capture.c")
@@ -132,11 +147,11 @@ def compile_and_load_native_c():
 
     if c_path.exists():
         try:
-            so_path.unlink(missing_ok=True)
-            res = subprocess.run(
-                ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-            )
+            if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
+                res = subprocess.run(
+                    ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                )
             lib = ctypes.CDLL(str(so_path))
             lib.capture_lepton_frame.argtypes = [
                 ctypes.c_char_p,
@@ -147,7 +162,8 @@ def compile_and_load_native_c():
                 ctypes.c_int,
             ]
             lib.capture_lepton_frame.restype = ctypes.c_int
-            return lib
+            _VERIFY_NATIVE_C_LIB = lib
+            return _VERIFY_NATIVE_C_LIB
         except Exception as exc:
             print(f"  [Native C Engine] Compiler note: {exc}")
             if hasattr(exc, "stderr") and exc.stderr:

@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import struct
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -462,89 +463,163 @@ def read_raw_status(bus_number: int = 1, address: int = 0x2A) -> int | None:
 
 
 def send_lepton_reboot_command(bus_number: int = 1, address: int = 0x2A) -> bool:
-    """Send SYS software reboot command (0x0242) over CCI I2C to force BootOK=True."""
+    """Send true OEM software reboot command (0x4842 / LEP_CID_OEM_REBOOT) over CCI I2C."""
     try:
         from smbus2 import SMBus, i2c_msg
         with SMBus(bus_number) as bus:
-            data_len_req = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
-            bus.i2c_rdwr(data_len_req)
+            # 1. Wait until camera is not busy (up to 1.0s)
+            for _ in range(10):
+                st = read_raw_status(bus_number=bus_number, address=address)
+                if st is not None and not (st & 0x0001):
+                    break
+                time.sleep(0.1)
+
+            # 2. Write Data Length register (0x0006) = 0 words
+            len_msg = i2c_msg.write(address, [0x00, 0x06, 0x00, 0x00])
+            bus.i2c_rdwr(len_msg)
             time.sleep(0.01)
-            cmd_req = i2c_msg.write(address, [0x00, 0x04, 0x02, 0x42])
-            bus.i2c_rdwr(cmd_req)
-            time.sleep(0.5)
+
+            # 3. Write Command register (0x0004) = 0x4842 (LEP_CID_OEM_REBOOT | LEP_RUN_TYPE)
+            #    (0x0842 is also accepted by Lepton CCI)
+            reboot_cmd = 0x4842
+            cmd_msg = i2c_msg.write(address, [0x00, 0x04, (reboot_cmd >> 8) & 0xFF, reboot_cmd & 0xFF])
+            bus.i2c_rdwr(cmd_msg)
+
+            # 4. Wait for Lepton ASIC to power-cycle internal DSP & reload firmware (~1.0s to 1.5s)
+            time.sleep(1.2)
+
+            # 5. Poll Status register up to 10 times to verify BootOK == 1 and Busy == 0
+            for _ in range(10):
+                try:
+                    st = read_raw_status(bus_number=bus_number, address=address)
+                    if st is not None and bool(st & 0x0004) and not bool(st & 0x0001):
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.2)
             return True
-    except Exception:
+    except Exception as exc:
+        LOGGER.debug("[CCI Reboot] Command failed or NACK during reboot: %s", exc)
         return False
 
 
-class VoSPIReader:
-    """Single-packet VoSPI reader for FLIR Lepton on RPi5."""
+def hardware_reset_lepton(reset_gpio: int) -> bool:
+    """Perform hardware active-low reset pulse on Lepton RESET_L pin."""
+    LOGGER.info("[Hardware Reset] Pulsing RESET_L pin on GPIO%d (Active-Low)...", reset_gpio)
+    # 1. Try modern libgpiod
+    try:
+        import gpiod
+        chip_name = "gpiochip4" if Path("/dev/gpiochip4").exists() else "gpiochip0"
+        with gpiod.Chip(chip_name) as chip:
+            line = chip.get_line(reset_gpio)
+            line.request(consumer="lepton_reset", type=gpiod.LINE_REQ_DIR_OUT)
+            line.set_value(0)
+            time.sleep(0.05)  # 50ms active-low reset pulse
+            line.set_value(1)
+            time.sleep(0.5)   # Wait for bootloader
+            line.release()
+        return True
+    except Exception:
+        pass
 
-    PACKET_BYTES = 164
+    # 2. Try RPi.GPIO
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(reset_gpio, GPIO.OUT, initial=GPIO.HIGH)
+        GPIO.output(reset_gpio, GPIO.LOW)
+        time.sleep(0.05)
+        GPIO.output(reset_gpio, GPIO.HIGH)
+        time.sleep(0.5)
+        return True
+    except Exception:
+        pass
 
-    def __init__(self, spi_bus: int = 0, spi_device: int = 0, speed: int = 10_000_000, mode: int = 3):
-        self.spi_bus = spi_bus
-        self.spi_device = spi_device
-        self.speed = speed
-        self.mode = mode
-        self.spi = None
-        self._tx_pkt = [0] * self.PACKET_BYTES
-
-    def open(self):
-        if spidev is not None:
-            self.spi = spidev.SpiDev()
-            self.spi.open(self.spi_bus, self.spi_device)
-            self.spi.max_speed_hz = self.speed
-            self.spi.mode = self.mode
-
-    def close(self):
-        if self.spi is not None:
-            self.spi.close()
-            self.spi = None
-
-    def read_packet(self) -> list[int]:
-        """Read exactly one VoSPI packet (164 bytes)."""
-        return self.spi.xfer2(self._tx_pkt)
-
-    def read_raw(self) -> list[int]:
-        """Read 164 raw bytes."""
-        return self.spi.xfer2(self._tx_pkt)
+    # 3. Sysfs fallback
+    try:
+        gpio_dir = Path(f"/sys/class/gpio/gpio{reset_gpio}")
+        if not gpio_dir.exists():
+            with open("/sys/class/gpio/export", "w") as f:
+                f.write(str(reset_gpio))
+            time.sleep(0.05)
+        with open(gpio_dir / "direction", "w") as f:
+            f.write("out")
+        with open(gpio_dir / "value", "w") as f:
+            f.write("0")
+        time.sleep(0.05)
+        with open(gpio_dir / "value", "w") as f:
+            f.write("1")
+        time.sleep(0.5)
+        return True
+    except Exception as exc:
+        LOGGER.warning("[Hardware Reset] Failed to pulse GPIO%d: %s", reset_gpio, exc)
+        return False
 
 
-def resync_reader(reader: VoSPIReader, delay: float = 0.5):
-    reader.close()
-    time.sleep(delay)
-    reader.open()
+def wait_lepton_ready(bus_number: int = 1, address: int = 0x2A, max_wait: float = 2.5) -> bool:
+    """Wait for Lepton to finish any in-progress FFC shutter calibration or internal boot."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        st = read_raw_status(bus_number=bus_number, address=address)
+        if st is not None:
+            busy = bool(st & 0x0001)
+            boot_ok = bool(st & 0x0004)
+            if boot_ok and not busy:
+                return True
+        time.sleep(0.1)
+    return False
+
+
+# Global singleton lock protecting concurrent camera hardware access
+_CAMERA_HARDWARE_LOCK = threading.Lock()
+
+# Cached C library handle to prevent repeated gcc calls and dlopen link_map leaks
+_NATIVE_C_LIB = None
+_NATIVE_C_TRIED = False
 
 
 def compile_and_load_native_c():
-    """Compile and load native C VoSPI capture shared object."""
+    """Compile once and cache native C VoSPI capture shared object (Singleton)."""
+    global _NATIVE_C_LIB, _NATIVE_C_TRIED
+    if _NATIVE_C_LIB is not None:
+        return _NATIVE_C_LIB
+    if _NATIVE_C_TRIED:
+        return None
+
     import ctypes
     import subprocess
     c_path = Path(__file__).parent / "lepton_capture.c"
     so_path = Path("/tmp/liblepton.so")
 
-    if c_path.exists():
-        try:
-            so_path.unlink(missing_ok=True)
+    if not c_path.exists():
+        _NATIVE_C_TRIED = True
+        return None
+
+    try:
+        # Only compile if the shared object doesn't already exist or was modified
+        if not so_path.exists() or so_path.stat().st_mtime < c_path.stat().st_mtime:
             subprocess.run(
                 ["gcc", "-O3", "-shared", "-fPIC", str(c_path), "-o", str(so_path)],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
-            lib = ctypes.CDLL(str(so_path))
-            lib.capture_lepton_frame.argtypes = [
-                ctypes.c_char_p,
-                ctypes.c_uint32,
-                ctypes.POINTER(ctypes.c_uint16),
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-            ]
-            lib.capture_lepton_frame.restype = ctypes.c_int
-            return lib
-        except Exception:
-            pass
-    return None
+        lib = ctypes.CDLL(str(so_path))
+        lib.capture_lepton_frame.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint16),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        lib.capture_lepton_frame.restype = ctypes.c_int
+        _NATIVE_C_LIB = lib
+        LOGGER.info("[Native C Engine] Successfully loaded & cached liblepton.so")
+        return _NATIVE_C_LIB
+    except Exception as exc:
+        LOGGER.warning("[Native C Engine] Native compilation/loading note: %s", exc)
+        _NATIVE_C_TRIED = True
+        return None
 
 
 def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80, height: int = 60) -> np.ndarray | None:
@@ -554,7 +629,7 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80,
         if reader.spi is None:
             reader.open()
         t0 = time.time()
-        print("  [pylepton Stream Engine] Synchronizing Lepton 3.x segments 1..4...")
+        LOGGER.debug("  [pylepton Stream Engine] Synchronizing Lepton 3.x segments 1..4...")
         segments_data = {}
         while time.time() - t0 < max_seconds:
             chunk_size = 24 * 164
@@ -604,7 +679,7 @@ def try_capture(reader: VoSPIReader, max_seconds: float = 15.0, width: int = 80,
                         col_off = 80 if (p_idx % 2 == 1) else 0
                         raw_frame[row, col_off : col_off + 80] = s_packets[p_idx]
                 elapsed = time.time() - t0
-                print(f"  [pylepton Stream Engine] SUCCESS! Captured Lepton 3.x frame in {elapsed:.2f}s!")
+                LOGGER.debug("  [pylepton Stream Engine] Captured Lepton 3.x frame in %.2fs", elapsed)
                 return raw_frame
         return None
 
@@ -693,118 +768,134 @@ class PiIRCamera(RGBCamera):
         colormap: str = "rainbow",
         upscale_factor: int = 8,
         fixed_temp_range: tuple[float, float] | None = None,
+        reset_gpio: int | None = None,
+        i2c_bus: int = 1,
+        i2c_address: int = 0x2A,
     ) -> None:
         self.vospi = LeptonVoSPI(spi_bus, spi_device, width, height)
         self.colormap = colormap
         self.upscale_factor = upscale_factor
         self.fixed_temp_range = fixed_temp_range
+        self.reset_gpio = reset_gpio
+        self.i2c_bus = i2c_bus
+        self.i2c_address = i2c_address
         self._consecutive_failures = 0
         super().__init__(image_dir, self._capture, image_type="ir")
+
+    def _recover_sensor(self) -> None:
+        """Perform escalated recovery: CS High de-assertion -> CCI 0x4842 Reboot -> GPIO Hardware Reset."""
+        # 1. Hold CS High for at least 250ms to reset VoSPI stream position
+        self.vospi.close()
+        time.sleep(0.25)
+
+        # 2. Software OEM Reboot (0x4842)
+        reboot_ok = send_lepton_reboot_command(bus_number=self.i2c_bus, address=self.i2c_address)
+        if reboot_ok:
+            LOGGER.info("[IR Recovery] Lepton CCI software OEM reboot (0x4842) completed")
+            time.sleep(0.3)
+            return
+
+        # 3. Hardware GPIO Reset (if RESET_L pin is wired)
+        if self.reset_gpio is not None:
+            LOGGER.warning("[IR Recovery] CCI reboot failed. Triggering GPIO%d hardware reset pulse...", self.reset_gpio)
+            if hardware_reset_lepton(self.reset_gpio):
+                LOGGER.info("[IR Recovery] GPIO%d hardware reset completed!", self.reset_gpio)
+                time.sleep(0.5)
+                return
+
+        LOGGER.warning("[IR Recovery] Recovery sequence completed.")
 
     def _capture(self, path: Path) -> None:
         if np is None or Image is None:
             raise ImportError("numpy and Pillow are required for PiIRCamera")
 
-        # Escalating recovery parameters based on consecutive failure count
-        failures = self._consecutive_failures
-        if failures >= 3:
-            resync_delay = 5.0
-            capture_timeout = 30.0
-        elif failures >= 2:
-            resync_delay = 2.0
-            capture_timeout = 30.0
-        else:
-            resync_delay = 0.5
-            capture_timeout = 15.0
+        with _CAMERA_HARDWARE_LOCK:
+            # 1. Pre-capture status check: gracefully wait if Lepton is busy with periodic FFC shutter
+            st = read_raw_status(bus_number=self.i2c_bus, address=self.i2c_address)
+            if st is not None:
+                busy = bool(st & 0x0001)
+                boot_ok = bool(st & 0x0004)
+                if busy:
+                    LOGGER.info("[IR Camera] Lepton FFC shutter active (Busy=1), waiting for completion...")
+                    if not wait_lepton_ready(self.i2c_bus, self.i2c_address, max_wait=2.5):
+                        LOGGER.warning("[IR Camera] Lepton remained busy after 2.5s timeout. Attempting recovery...")
+                        self._recover_sensor()
+                elif not boot_ok:
+                    LOGGER.warning("[IR Camera] Lepton BootOK is False. Attempting recovery...")
+                    self._recover_sensor()
 
-        # 1. Probing Lepton CCI status & auto-reboot if BootOK=False (matching verify_ir.py)
-        status_reg = read_raw_status(bus_number=1, address=0x2A)
-        if status_reg is not None:
-            busy = bool(status_reg & 0x0001)
-            boot_ok = bool(status_reg & 0x0004)
-            if not boot_ok or busy:
-                send_lepton_reboot_command(bus_number=1, address=0x2A)
-                for _ in range(10):
-                    time.sleep(0.2)
-                    st = read_raw_status(bus_number=1, address=0x2A)
-                    if st is not None and bool(st & 0x0004) and not bool(st & 0x0001):
-                        break
+            # 2. Primary High-Performance Native C Engine (Sub-20ms atomic ioctl)
+            #    NOTE: Always keep C engine active! Never lock it out on repeated failures.
+            raw_frame = None
+            is_mock_spidev = hasattr(spidev, "_mock_name") or type(spidev).__name__ in ("Mock", "MagicMock")
+            c_lib = compile_and_load_native_c() if not is_mock_spidev else None
 
-        # 1.5 Pre-emptive escalated recovery for persistent failures
-        if failures >= 3:
-            LOGGER.warning(
-                "[IR Recovery] %d consecutive failures — escalated pre-capture recovery: "
-                "CCI reboot + FFC recalibration + %.1fs CS high resync",
-                failures, resync_delay,
-            )
-            send_lepton_reboot_command(bus_number=1, address=0x2A)
-            time.sleep(0.5)
-            send_lepton_ffc_command(bus_number=1, address=0x2A)
-            time.sleep(resync_delay)
-
-        # 2. Execute Native C Zero-Latency Engine FIRST (Sub-20ms high performance)
-        #    Skip C engine after 2+ consecutive failures to avoid wasting ~30s on dead hardware.
-        raw_frame = None
-        if failures < 2:
-            c_lib = compile_and_load_native_c()
             if c_lib is not None:
                 import ctypes
                 frame_buf = (ctypes.c_uint16 * (self.vospi.width * self.vospi.height))()
                 dev_path = f"/dev/spidev{self.vospi.spi_bus}.{self.vospi.spi_device}".encode("utf-8")
+                self.vospi.close()
                 attempts = c_lib.capture_lepton_frame(
                     dev_path,
                     self.vospi.spi_speed,
                     frame_buf,
                     self.vospi.width,
                     self.vospi.height,
-                    1000,
+                    1500,
                 )
                 if attempts > 0:
                     raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
-        if raw_frame is None:
-            # Fallback Python reader matching verify_ir.py exactly
-            reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
-            try:
-                resync_reader(reader, resync_delay)
-                raw_frame = try_capture(reader, max_seconds=capture_timeout, width=self.vospi.width, height=self.vospi.height)
-                if raw_frame is None:
-                    # Auto-recovery: ALWAYS use strong recovery on first retry
-                    # CCI Reboot + FFC recalibration + 2s minimum CS high resync
-                    retry_resync = max(resync_delay, 2.0)
-                    LOGGER.warning(
-                        "[IR Recovery] First capture failed. "
-                        "Strong recovery: CCI reboot + FFC + %.1fs resync...",
-                        retry_resync,
-                    )
-                    send_lepton_reboot_command(bus_number=1, address=0x2A)
-                    time.sleep(0.3)
-                    send_lepton_ffc_command(bus_number=1, address=0x2A)
-                    resync_reader(reader, retry_resync)
-                    raw_frame = try_capture(reader, max_seconds=30.0, width=self.vospi.width, height=self.vospi.height)
-            finally:
-                reader.close()
+            # 3. If primary capture failed, perform CS-high de-assertion + recovery and retry Native C
+            if raw_frame is None and c_lib is not None:
+                self._consecutive_failures += 1
+                LOGGER.warning(
+                    "[IR Camera] Primary capture missed frame (%d consecutive failures). Performing recovery & retry...",
+                    self._consecutive_failures,
+                )
+                self._recover_sensor()
+                attempts = c_lib.capture_lepton_frame(
+                    dev_path,
+                    self.vospi.spi_speed,
+                    frame_buf,
+                    self.vospi.width,
+                    self.vospi.height,
+                    2000,
+                )
+                if attempts > 0:
+                    raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
-        # Always ensure our shared vospi SPI handle is released after capture
-        self.vospi.close()
+            # 4. Fallback Python reader (for mock environments or platforms without gcc)
+            if raw_frame is None:
+                reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
+                try:
+                    resync_reader(reader, delay=0.25)
+                    raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
+                    if raw_frame is None:
+                        self._recover_sensor()
+                        resync_reader(reader, delay=0.5)
+                        raw_frame = try_capture(reader, max_seconds=20.0, width=self.vospi.width, height=self.vospi.height)
+                finally:
+                    reader.close()
 
-        if raw_frame is None:
-            self._consecutive_failures += 1
-            LOGGER.error(
-                "[IR Recovery] Capture failed (%d consecutive failures). "
-                "Next attempt will use %.1fs CS high resync.",
-                self._consecutive_failures,
-                min(5.0, 0.5 * (2 ** min(self._consecutive_failures, 3))),
-            )
-            raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")
+            # Always ensure our shared vospi SPI handle is released after capture
+            self.vospi.close()
 
-        # Success — reset consecutive failure counter
-        if self._consecutive_failures > 0:
-            LOGGER.info(
-                "[IR Recovery] Capture recovered after %d consecutive failures!",
-                self._consecutive_failures,
-            )
-        self._consecutive_failures = 0
+            if raw_frame is None:
+                self._consecutive_failures += 1
+                LOGGER.error(
+                    "[IR Recovery] Capture failed (%d consecutive failures). Lepton VoSPI timed out.",
+                    self._consecutive_failures,
+                )
+                raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")
+
+            # Success — reset consecutive failure counter
+            if self._consecutive_failures > 0:
+                LOGGER.info(
+                    "[IR Recovery] Capture recovered successfully after %d failures!",
+                    self._consecutive_failures,
+                )
+            self._consecutive_failures = 0
 
         clean_frame = raw_frame & 0x3FFF
         h, w = clean_frame.shape

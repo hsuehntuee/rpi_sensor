@@ -104,20 +104,33 @@ def build_scd41_task(
     return collect
 
 
+_CAMERA_TASK_LOCK = threading.Lock()
+
+
 def build_camera_task(
     database: LocalDatabase,
     device_id: str,
     rgb_camera: Camera,
     ir_camera: Camera,
+    min_disk_free_mb: int = 1500,
+    image_dir: Path | None = None,
 ) -> Callable[[], None]:
     def capture() -> None:
-        for image_type, camera in (("RGB", rgb_camera), ("IR", ir_camera)):
-            try:
-                path = camera.capture()
-                database.insert_camera(device_id, image_type, str(path))
-                LOGGER.info("[%s Camera] Saved image to: %s", image_type, path)
-            except Exception:
-                LOGGER.exception("%s camera capture failed", image_type)
+        if not _CAMERA_TASK_LOCK.acquire(blocking=False):
+            LOGGER.warning("Camera capture already in progress. Skipping duplicate run.")
+            return
+        try:
+            # Enforce safety watermark before new captures to prevent SD card exhaustion
+            database.enforce_disk_limit(min_free_mb=min_disk_free_mb, image_dir=image_dir)
+            for image_type, camera in (("RGB", rgb_camera), ("IR", ir_camera)):
+                try:
+                    path = camera.capture()
+                    database.insert_camera(device_id, image_type, str(path))
+                    LOGGER.info("[%s Camera] Saved image to: %s", image_type, path)
+                except Exception:
+                    LOGGER.exception("%s camera capture failed", image_type)
+        finally:
+            _CAMERA_TASK_LOCK.release()
 
     return capture
 
@@ -128,7 +141,10 @@ def build_scd41_hvac_task(
     scd41: Readable,
     hvac: StatusReadable | None,
 ) -> Callable[[], None]:
+    _hvac_err_count = 0
+
     def collect() -> None:
+        nonlocal _hvac_err_count
         try:
             reading = scd41.read()
             if reading is not None:
@@ -157,9 +173,16 @@ def build_scd41_hvac_task(
                         else float(status["power_w"])
                     ),
                 )
-            except Exception:
+                if _hvac_err_count > 0:
+                    LOGGER.info("HVAC Modbus communication restored after %d failures", _hvac_err_count)
+                    _hvac_err_count = 0
+            except Exception as exc:
+                _hvac_err_count += 1
                 database.insert_hvac(device_id, hvac_state=-1, power_w=None)
-                LOGGER.exception("HVAC status read failed")
+                if _hvac_err_count == 1:
+                    LOGGER.warning("HVAC status read failed: %s (will retry silently)", exc)
+                elif _hvac_err_count % 288 == 0:  # once every 24 hours
+                    LOGGER.warning("HVAC status still unreachable after %d attempts: %s", _hvac_err_count, exc)
 
     return collect
 
@@ -169,6 +192,7 @@ def build_scheduler(
     sensor_task: Callable[[], None],
     camera_task: Callable[[], None],
     sync_task: Callable[[], None],
+    retention_task: Callable[[], None] | None = None,
 ) -> BlockingScheduler:
     scheduler = BlockingScheduler(timezone="Asia/Taipei")
     # 準時整點排程 (Cron Trigger)：以標準時間的每 5 分鐘整點（如 10:00, 10:05, 10:10...）取樣一次
@@ -199,6 +223,17 @@ def build_scheduler(
         max_instances=1,
         coalesce=True,
     )
+    # 本地磁碟維護任務：每日凌晨 03:00 自動清理已同步超過保留天數的舊檔案與歷史紀錄
+    if retention_task is not None:
+        scheduler.add_job(
+            guarded("retention", retention_task),
+            "cron",
+            hour=3,
+            minute=0,
+            id="retention",
+            max_instances=1,
+            coalesce=True,
+        )
     return scheduler
 
 
@@ -256,8 +291,15 @@ def main() -> None:
     rgb_camera = None
     try:
         from src.sensors.camera_rgb import PiCamera
-        rgb_camera = PiCamera(settings.image_dir, camera_index=settings.rgb_camera_index)
-        LOGGER.info("Successfully initialized RGB PiCamera on index %d", settings.rgb_camera_index)
+        rgb_camera = PiCamera(
+            settings.image_dir,
+            camera_index=settings.rgb_camera_index,
+            width=settings.rgb_width,
+            height=settings.rgb_height,
+            quality=settings.rgb_quality,
+        )
+        LOGGER.info("Successfully initialized RGB PiCamera on index %d (%dx%d, q=%d)",
+                    settings.rgb_camera_index, settings.rgb_width, settings.rgb_height, settings.rgb_quality)
     except Exception as exc:
         LOGGER.warning("Could not initialize real RGB camera: %s. Using dummy camera.", exc)
 
@@ -279,6 +321,9 @@ def main() -> None:
             width=model.width,
             height=model.height,
             colormap=settings.lepton_colormap,
+            reset_gpio=settings.lepton_reset_gpio,
+            i2c_bus=settings.lepton_i2c_bus,
+            i2c_address=settings.lepton_i2c_address,
         )
         LOGGER.info("Successfully initialized FLIR Lepton IR Camera on SPI bus %d, device %d",
                     settings.lepton_spi_bus, settings.lepton_spi_device)
@@ -345,6 +390,8 @@ def main() -> None:
         device_id=settings.device_id,
         rgb_camera=rgb_camera,
         ir_camera=ir_camera,
+        min_disk_free_mb=settings.min_disk_free_mb,
+        image_dir=settings.image_dir,
     )
 
     _sync_fail_count = 0
@@ -352,26 +399,37 @@ def main() -> None:
     def sync_task() -> None:
         nonlocal _sync_fail_count
         try:
-            count = sync.sync_all()
+            count = sync.sync_all(metrics_batch=100, image_batch=10)
             if count > 0:
                 if _sync_fail_count > 0:
-                    LOGGER.info("RemoteSync recovered after %d failures", _sync_fail_count)
+                    LOGGER.info("RemoteSync: connection restored after %d failed attempts! Resuming gradual sync.", _sync_fail_count)
                 _sync_fail_count = 0
                 LOGGER.info("RemoteSync: %d items synced to %s", count, settings.server_url)
             elif _sync_fail_count == 0:
                 pass  # server reachable but nothing to sync — silent
         except Exception as exc:
             _sync_fail_count += 1
-            if _sync_fail_count <= 1:
-                LOGGER.warning("RemoteSync: server unreachable (%s), will retry silently", exc)
-            elif _sync_fail_count % 20 == 0:
-                LOGGER.warning("RemoteSync: still unreachable after %d attempts", _sync_fail_count)
+            if _sync_fail_count == 1:
+                LOGGER.warning("RemoteSync: server unreachable (%s), entering offline buffering mode (will retry silently)", exc)
+            elif _sync_fail_count % 1440 == 0:  # once every 12 hours (1440 * 30s)
+                LOGGER.warning(
+                    "RemoteSync: still offline after %d attempts (%.1f days offline). Data safely buffered locally.",
+                    _sync_fail_count, (_sync_fail_count * 30) / 86400,
+                )
+
+    def maintenance_task() -> None:
+        res = database.purge_old_synced_data(settings.image_retention_days)
+        freed = database.enforce_disk_limit(settings.min_disk_free_mb, image_dir=settings.image_dir)
+        deleted_imgs = res.get("deleted_images", 0) + freed
+        if deleted_imgs > 0:
+            LOGGER.info("Daily Maintenance: pruned %d old/excess photos to maintain disk safety", deleted_imgs)
 
     scheduler = build_scheduler(
         settings,
         sensor_task=sensor_task,
         camera_task=camera_task,
         sync_task=sync_task,
+        retention_task=maintenance_task,
     )
     stop_once = threading.Event()
     web_server = None

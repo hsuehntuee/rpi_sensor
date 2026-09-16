@@ -102,48 +102,90 @@ def create_edge_app(
         }
 
     @app.get("/api/v1/images/list")
-    def list_local_images() -> list[dict[str, Any]]:
+    def list_local_images(limit: int = 60, type: str | None = None) -> list[dict[str, Any]]:
+        """回傳本地最新 X 筆相片清單（預設最新 60 筆，避免遍歷全磁碟導致 CPU 與記憶體載入過大）"""
+        # 優先路徑：直接自 SQLite 索引查詢最新 X 筆紀錄（極速 0.2ms，零磁碟 I/O 負擔）
+        try:
+            db_type = type.upper() if type and type.upper() in ("RGB", "IR") else None
+            records = database.get_latest_cameras(limit=limit, image_type=db_type)
+            if records:
+                images = []
+                for row in records:
+                    fpath = row.get("file_path", "")
+                    p = Path(fpath)
+                    try:
+                        rel_path = p.relative_to(image_dir).as_posix()
+                    except Exception:
+                        rel_path = p.name
+                    size_bytes = _get_file_size(fpath)
+                    images.append({
+                        "name": p.name,
+                        "relative_path": rel_path,
+                        "url": _resolve_image_url(fpath),
+                        "size_bytes": size_bytes,
+                        "type": str(row.get("image_type", "RGB")).upper(),
+                        "mtime": str(row.get("timestamp", "")),
+                    })
+                return images
+        except Exception as exc:
+            LOGGER.debug("Could not fetch image list from DB, falling back to scandir: %s", exc)
+
+        # 備援路徑：若 DB 尚未初始化，以非遞迴方式快速取最新的 limit 筆檔案
         images = []
         if image_dir.exists():
-            for path in image_dir.rglob("*"):
-                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".tif", ".tiff"}:
-                    try:
-                        rel_path = path.relative_to(image_dir).as_posix()
-                        stat = path.stat()
-                        is_ir = "ir" in path.name.lower()
-                        images.append({
-                            "name": path.name,
-                            "relative_path": rel_path,
-                            "url": f"/static/images/{rel_path}",
-                            "size_bytes": stat.st_size,
-                            "type": "IR" if is_ir else "RGB",
-                            "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                        })
-                    except Exception:
+            try:
+                entries = [
+                    e for e in os.scandir(image_dir)
+                    if e.is_file() and e.name.lower().endswith((".jpg", ".jpeg", ".png"))
+                ]
+                entries.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                for entry in entries:
+                    is_ir = "ir" in entry.name.lower()
+                    img_type = "IR" if is_ir else "RGB"
+                    if type and type.upper() != img_type:
                         continue
-        return sorted(images, key=lambda x: x["mtime"], reverse=True)
+                    stat = entry.stat()
+                    images.append({
+                        "name": entry.name,
+                        "relative_path": entry.name,
+                        "url": f"/static/images/{entry.name}",
+                        "size_bytes": stat.st_size,
+                        "type": img_type,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    })
+                    if len(images) >= limit:
+                        break
+            except Exception as exc:
+                LOGGER.warning("Scandir fallback failed: %s", exc)
+        return images
 
     @app.post("/api/v1/actions/capture")
     def action_instant_capture() -> dict[str, Any]:
-        """手動觸發立即拍攝 (RGB & IR) 並上傳同步"""
+        """手動觸發立即拍攝 (RGB & IR) 並嘗試上傳同步 (若離線則安全保存於本地)"""
         if capture_callback is None:
             raise HTTPException(status_code=501, detail="Instant capture is not supported in current mode")
         
         with action_lock:
             try:
                 capture_callback()
-                synced_count = 0
-                if sync_callback is not None:
-                    synced_count = sync_callback()
-                return {
-                    "status": "success",
-                    "message": "雙相機立即拍攝與伺服器同步完成！",
-                    "synced_count": synced_count,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
             except Exception as exc:
                 LOGGER.exception("Manual instant capture failed: %s", exc)
-                raise HTTPException(status_code=500, detail=f"拍照或同步失敗: {exc}")
+                raise HTTPException(status_code=500, detail=f"拍照失敗: {exc}")
+
+            synced_count = 0
+            if sync_callback is not None:
+                try:
+                    synced_count = sync_callback()
+                except Exception as sync_exc:
+                    LOGGER.debug("Manual capture succeeded, but instant sync skipped (offline): %s", sync_exc)
+
+            msg = "雙相機立即拍攝成功！" + ("（已同步至 Server）" if synced_count > 0 else "（已離線保存，待連網後同步）")
+            return {
+                "status": "success",
+                "message": msg,
+                "synced_count": synced_count,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
 
     @app.post("/api/v1/actions/sync")
     def action_instant_sync() -> dict[str, Any]:
@@ -173,7 +215,7 @@ def create_edge_app(
     return app
 
 
-EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
+EDGE_DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
@@ -792,11 +834,24 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
 
         <!-- Gallery Tab -->
         <div id="tabGallery" class="table-wrap" style="display: none;">
-            <div class="gallery-filter">
-                <span style="font-size:0.8rem; color:var(--text-muted);">篩選相片：</span>
-                <button class="active" onclick="filterGallery('ALL', this)">全部 (<span id="countAllImgs">0</span>)</button>
-                <button onclick="filterGallery('RGB', this)">RGB 可見光 (<span id="countRgbImgs">0</span>)</button>
-                <button onclick="filterGallery('IR', this)">IR 熱影像 (<span id="countIrImgs">0</span>)</button>
+            <div class="gallery-filter" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:center;">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">類型：</span>
+                    <button class="active" onclick="filterGallery('ALL', this)">全部 (<span id="countAllImgs">0</span>)</button>
+                    <button onclick="filterGallery('RGB', this)">RGB 可見光 (<span id="countRgbImgs">0</span>)</button>
+                    <button onclick="filterGallery('IR', this)">IR 熱影像 (<span id="countIrImgs">0</span>)</button>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">顯示最新：</span>
+                    <select id="galleryLimitSelect" onchange="changeGalleryLimit(this.value)" style="background:var(--bg-body); color:var(--text-main); border:1px solid var(--border-bright); border-radius:6px; padding:4px 8px; font-size:0.8rem; cursor:pointer;">
+                        <option value="20">最新 20 筆</option>
+                        <option value="40">最新 40 筆</option>
+                        <option value="60" selected>最新 60 筆 (預設)</option>
+                        <option value="100">最新 100 筆</option>
+                        <option value="200">最新 200 筆</option>
+                    </select>
+                    <button onclick="fetchGalleryData(true)" style="background:transparent; border:1px solid var(--border-bright); color:var(--text-muted); padding:4px 10px; border-radius:6px; font-size:0.8rem; cursor:pointer;" title="重新整理相簿">🔄 重新整理</button>
+                </div>
             </div>
             <div class="gallery-grid" id="galleryContainer">
                 <div style="grid-column: 1/-1; text-align: center; color: var(--text-dim); padding: 30px;">載入本地相片中...</div>
@@ -848,6 +903,12 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
         let isAuto = true;
         let allGalleryImages = [];
         let currentFilter = 'ALL';
+        let currentTab = 'env';
+        let galleryLimit = 60;
+        let lastGalleryFetchedAt = 0;
+        let isGalleryFetching = false;
+        let lastRgbTimestamp = null;
+        let lastIrTimestamp = null;
 
         function showToast(msg, type = 'success') {
             const toast = document.getElementById('toastNotice');
@@ -869,10 +930,8 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 const data = await res.json();
                 renderOverview(data);
 
-                const imgRes = await fetch('/api/v1/images/list');
-                if (imgRes.ok) {
-                    allGalleryImages = await imgRes.json();
-                    renderGallery(allGalleryImages, currentFilter);
+                if (currentTab === 'gallery') {
+                    await fetchGalleryData();
                 }
 
                 document.getElementById('lastUpdated').textContent = '最後更新: ' + new Date().toLocaleTimeString();
@@ -880,6 +939,30 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 console.error(err);
                 document.getElementById('lastUpdated').textContent = '連線失敗: ' + err.message;
             }
+        }
+
+        async function fetchGalleryData(force = false) {
+            const now = Date.now();
+            if (!force && now - lastGalleryFetchedAt < 10000) return;
+            if (isGalleryFetching) return;
+            isGalleryFetching = true;
+            try {
+                const imgRes = await fetch(`/api/v1/images/list?limit=${galleryLimit}`);
+                if (imgRes.ok) {
+                    allGalleryImages = await imgRes.json();
+                    renderGallery(allGalleryImages, currentFilter);
+                    lastGalleryFetchedAt = Date.now();
+                }
+            } catch (err) {
+                console.warn('Failed to fetch gallery:', err);
+            } finally {
+                isGalleryFetching = false;
+            }
+        }
+
+        function changeGalleryLimit(val) {
+            galleryLimit = parseInt(val, 10) || 60;
+            fetchGalleryData(true);
         }
 
         function renderOverview(data) {
@@ -936,7 +1019,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 document.getElementById('hwHvacStatus').textContent = 'Modbus 未連線';
             }
 
-            // Latest RGB Camera Image
+            // Latest RGB Camera Image (Cached to prevent reload flicker)
             const rgbImg = document.getElementById('rgbImg');
             const rgbPh = document.getElementById('rgbPlaceholder');
             const rgbErr = document.getElementById('rgbErrorCard');
@@ -948,7 +1031,11 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 rgbErr.style.display = 'none';
                 rgbPh.style.display = 'none';
                 rgbImg.style.display = 'block';
-                rgbImg.src = rgb.url + '?t=' + Date.now();
+                if (lastRgbTimestamp !== rgb.timestamp || rgbImg.getAttribute('data-loaded-src') !== rgb.url) {
+                    rgbImg.src = rgb.url + '?t=' + encodeURIComponent(rgb.timestamp);
+                    rgbImg.setAttribute('data-loaded-src', rgb.url);
+                    lastRgbTimestamp = rgb.timestamp;
+                }
                 rgbLink.href = rgb.url;
                 rgbLink.style.display = 'inline';
                 document.getElementById('rgbTime').textContent = formatTime(rgb.timestamp);
@@ -967,7 +1054,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 document.getElementById('rgbSize').textContent = '大小: --';
             }
 
-            // Latest IR Camera Image
+            // Latest IR Camera Image (Cached to prevent reload flicker)
             const irImg = document.getElementById('irImg');
             const irPh = document.getElementById('irPlaceholder');
             const irErr = document.getElementById('irErrorCard');
@@ -979,7 +1066,11 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 irErr.style.display = 'none';
                 irPh.style.display = 'none';
                 irImg.style.display = 'block';
-                irImg.src = ir.url + '?t=' + Date.now();
+                if (lastIrTimestamp !== ir.timestamp || irImg.getAttribute('data-loaded-src') !== ir.url) {
+                    irImg.src = ir.url + '?t=' + encodeURIComponent(ir.timestamp);
+                    irImg.setAttribute('data-loaded-src', ir.url);
+                    lastIrTimestamp = ir.timestamp;
+                }
                 irLink.href = ir.url;
                 irLink.style.display = 'inline';
                 document.getElementById('irTime').textContent = formatTime(ir.timestamp);
@@ -987,7 +1078,6 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
 
                 irSyncTag.style.display = 'inline-block';
                 irSyncTag.className = ir.is_synced ? 'sync-tag synced' : 'sync-tag pending';
-                irSyncTag.textContent = ir.is_synced ? '✓ 已同步' : '⏳ 待上傳';
             } else {
                 irImg.style.display = 'none';
                 irErr.style.display = 'none';
@@ -1094,6 +1184,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 if (!res.ok) throw new Error(json.detail || '拍攝失敗');
                 showToast(json.message || '立即拍照與同步完成！', 'success');
                 await fetchData();
+                await fetchGalleryData(true);
             } catch (err) {
                 console.error(err);
                 showToast('拍照失敗: ' + err.message, 'error');
@@ -1114,6 +1205,7 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
                 if (!res.ok) throw new Error(json.detail || '同步失敗');
                 showToast(json.message || '同步完成！', 'success');
                 await fetchData();
+                await fetchGalleryData(true);
             } catch (err) {
                 console.error(err);
                 showToast('同步失敗: ' + err.message, 'error');
@@ -1151,12 +1243,16 @@ EDGE_DASHBOARD_HTML = """<!DOCTYPE html>
         }
 
         function switchTab(tab, btn) {
+            currentTab = tab;
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             if (btn) btn.classList.add('active');
             document.getElementById('tabEnv').style.display = tab === 'env' ? 'block' : 'none';
             document.getElementById('tabHvac').style.display = tab === 'hvac' ? 'block' : 'none';
             document.getElementById('tabGallery').style.display = tab === 'gallery' ? 'block' : 'none';
             document.getElementById('tabHardware').style.display = tab === 'hardware' ? 'block' : 'none';
+            if (tab === 'gallery') {
+                fetchGalleryData(true);
+            }
         }
 
         function openModal(src, title) {

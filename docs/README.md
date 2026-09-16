@@ -28,6 +28,7 @@
 | **Pin 3** | GPIO2 (I2C1 SDA) | **SDA** | Lepton CCI I2C1 數據線 (與其他 I2C 設備位址 `0x2A` 隔離) |
 | **Pin 5** | GPIO3 (I2C1 SCL) | **SCL** | Lepton CCI I2C1 時鐘線 |
 | **Pin 11** | GPIO17 | **VSYNC** | Lepton 硬體影格同步腳位 *(獨立引腳，無佔線衝突)* |
+| **Pin 13** | GPIO27 | **RESET_L** | *(選接)* Lepton 硬體冷重置腳位 (Active Low，於 `.env` 設 `LEPTON_RESET_GPIO=27`) |
 
 ---
 
@@ -113,9 +114,9 @@ CREATE TABLE camera_logs (
 *   **RGB Camera ([camera_rgb.py](src/sensors/camera_rgb.py))**:
     使用新版樹莓派官方支援的 `rpicam-still` 擷取影像。
 *   **FLIR Lepton IR Camera ([camera_ir.py](src/sensors/camera_ir.py))**:
-    - **CCI 控制**：經由 I2C 讀取 Lepton 核心料號並自動判定解析度（如 Lepton 2.5 為 80x60，Lepton 3.5 為 160x120）。
-    - **VoSPI 接收**：自實體 SPI0 連接埠以 20MHz 速度讀取 164-byte 封包。支援 Lepton 3.x 分段拼接（檢查 Packet 20 中的 Segment ID 進行影像對齊與防掉幀重置）。
-    - **影像生成**：讀取出的 16-bit 熱原始數據經由 `numpy` 進行 Min-Max 歸一化，並由 `Pillow` 導出為標準 JPG 影像。
+    - **CCI 控制與真 OEM Reboot**：經由 I2C 讀取 Lepton 核心料號並自動判定解析度。若遇到異常或逾時，自動發送原廠標準 `0x4842` (`LEP_CID_OEM_REBOOT`) 指令重啟 ASIC，並可選擇性結合 `RESET_L` 進行硬體級冷重置。
+    - **VoSPI 接收**：使用 Native C 高性能單例驅動以 atomic ioctl 讀取。支援 Lepton 3.x 分段拼接與 250ms CS High 時序脫困。
+    - **影像生成**：讀取出的 16-bit 熱原始數據經由 `numpy` 進行 Percentile 動態範圍裁切、去條紋中值濾波，並由 `Pillow` 導出為標準 JPG 影像。
 
 ### 4.2 備援與容錯設計 (Fault Tolerance)
 *   **多執行緒寫入防鎖定**：資料庫實作連線 `timeout=20.0`，有效預防 APScheduler 多執行緒背景併發讀寫 SQLite 時產生的 `database is locked` 錯誤。

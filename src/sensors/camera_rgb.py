@@ -15,10 +15,12 @@ class RGBCamera:
         image_dir: Path,
         capture: Callable[[Path], None],
         image_type: str = "rgb",
+        quality: int = 85,
     ) -> None:
         self.image_dir = image_dir
         self.capture_impl = capture
         self.image_type = image_type
+        self.quality = quality
 
     def capture(self) -> Path:
         self.image_dir.mkdir(parents=True, exist_ok=True)
@@ -36,7 +38,7 @@ class RGBCamera:
             from PIL import Image, ImageOps
             with Image.open(path) as img:
                 mirrored = ImageOps.mirror(img)
-                mirrored.save(path, quality=95)
+                mirrored.save(path, quality=self.quality)
         except Exception:
             pass
         return path
@@ -50,16 +52,27 @@ class PiCamera(RGBCamera):
         image_dir: Path,
         camera_index: int = 0,
         runner: Callable[..., Any] = subprocess.run,
+        width: int = 1920,
+        height: int = 1080,
+        quality: int = 85,
     ) -> None:
         self.camera_index = camera_index
         self.runner = runner
-        super().__init__(image_dir, self._capture)
+        self.width = width
+        self.height = height
+        super().__init__(image_dir, self._capture, quality=quality)
 
     def _capture(self, path: Path) -> None:
         # === Strategy 1: nsenter host capture (Docker + pid:host) ===
         # IMX500 AI camera rpicam-still crashes inside Docker containers
         # due to missing firmware context. Use nsenter to call the host's
         # rpicam-still via /dev/shm as shared temp path.
+        extra_flags = [
+            "--width", str(self.width),
+            "--height", str(self.height),
+            "-q", str(self.quality),
+        ]
+
         if Path("/.dockerenv").exists():
             shm_temp = Path("/dev/shm/_rpi_rgb_capture.jpg")
             for host_cmd in ("rpicam-still", "libcamera-still"):
@@ -73,8 +86,9 @@ class PiCamera(RGBCamera):
                             "--nopreview",
                             "--zsl",
                             "--timeout", "5000",
-                            "--output", str(shm_temp),
-                        ],
+                        ]
+                        + extra_flags
+                        + ["--output", str(shm_temp)],
                         check=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -107,9 +121,9 @@ class PiCamera(RGBCamera):
                             "--zsl",
                             "--timeout",
                             "5000",
-                            "--output",
-                            str(path),
-                        ],
+                        ]
+                        + extra_flags
+                        + ["--output", str(path)],
                         check=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -124,9 +138,8 @@ class PiCamera(RGBCamera):
         # === Strategy 3: ffmpeg V4L2 fallback ===
         ffmpeg_cmd = shutil.which("ffmpeg")
         if ffmpeg_cmd:
-            video_devices = [f"/dev/video{self.camera_index}"] + [
-                f"/dev/video{v}" for v in range(10) if v != self.camera_index
-            ]
+            alt_idx = 1 if self.camera_index == 0 else 0
+            video_devices = [f"/dev/video{self.camera_index}", f"/dev/video{alt_idx}"]
             for video_dev in video_devices:
                 if Path(video_dev).exists():
                     try:
@@ -189,9 +202,9 @@ class PiCamera(RGBCamera):
                 "--zsl",
                 "--timeout",
                 "5000",
-                "--output",
-                str(path),
-            ],
+            ]
+            + extra_flags
+            + ["--output", str(path)],
             check=True,
             timeout=30,
         )

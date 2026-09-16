@@ -30,30 +30,36 @@ class Settings:
     api_key: str
     database_path: Path
     image_dir: Path
-    log_level: str
-    http_timeout_seconds: float
-    scd41_i2c_bus: int
-    scd41_poll_seconds: int
-    camera_interval_seconds: int
-    sample_interval_minutes: int
-    sample_cron_minute: str
-    rgb_camera_index: int
-    lepton_spi_bus: int
-    lepton_spi_device: int
-    lepton_i2c_bus: int
-    lepton_i2c_address: int
-    lepton_width: int | None
-    lepton_height: int | None
-    lepton_colormap: str
-    modbus_port: str
-    modbus_baudrate: int
-    modbus_slave_id: int | None
-    modbus_state_register: int | None
-    modbus_control_register: int | None
-    modbus_power_register: int | None
-    edge_web_enabled: bool
-    edge_web_host: str
-    edge_web_port: int
+    log_level: str = "INFO"
+    http_timeout_seconds: float = 10.0
+    scd41_i2c_bus: int = 2
+    scd41_poll_seconds: int = 300
+    camera_interval_seconds: int = 300
+    sample_interval_minutes: int = 5
+    sample_cron_minute: str = "*/5"
+    rgb_camera_index: int = 0
+    rgb_width: int = 1920
+    rgb_height: int = 1080
+    rgb_quality: int = 85
+    image_retention_days: int = 14
+    min_disk_free_mb: int = 1500
+    lepton_spi_bus: int = 0
+    lepton_spi_device: int = 0
+    lepton_i2c_bus: int = 1
+    lepton_i2c_address: int = 0x2A
+    lepton_width: int | None = 160
+    lepton_height: int | None = 120
+    lepton_colormap: str = "rainbow"
+    lepton_reset_gpio: int | None = None
+    modbus_port: str = "/dev/ttyUSB0"
+    modbus_baudrate: int = 9600
+    modbus_slave_id: int | None = None
+    modbus_state_register: int | None = None
+    modbus_control_register: int | None = None
+    modbus_power_register: int | None = None
+    edge_web_enabled: bool = True
+    edge_web_host: str = "0.0.0.0"
+    edge_web_port: int = 8080
 
 
 def load_settings(env_file: str | None = None) -> Settings:
@@ -97,6 +103,11 @@ def load_settings(env_file: str | None = None) -> Settings:
         sample_interval_minutes=sample_interval_minutes,
         sample_cron_minute=sample_cron_minute,
         rgb_camera_index=_int("RGB_CAMERA_INDEX", "0"),
+        rgb_width=_int("RGB_WIDTH", "1920"),
+        rgb_height=_int("RGB_HEIGHT", "1080"),
+        rgb_quality=_int("RGB_QUALITY", "85"),
+        image_retention_days=_int("IMAGE_RETENTION_DAYS", "14"),
+        min_disk_free_mb=_int("MIN_DISK_FREE_MB", "1500"),
         lepton_spi_bus=_int("LEPTON_SPI_BUS", "0"),
         lepton_spi_device=_int("LEPTON_SPI_DEVICE", "0"),
         lepton_i2c_bus=_int("LEPTON_I2C_BUS", "1"),
@@ -104,6 +115,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         lepton_width=_optional_int("LEPTON_WIDTH") or 160,
         lepton_height=_optional_int("LEPTON_HEIGHT") or 120,
         lepton_colormap=os.getenv("LEPTON_COLORMAP", "rainbow").lower(),
+        lepton_reset_gpio=_optional_int("LEPTON_RESET_GPIO"),
         modbus_port=os.getenv("MODBUS_PORT", "/dev/ttyUSB0"),
         modbus_baudrate=int(os.getenv("MODBUS_BAUDRATE", "9600")),
         modbus_slave_id=_optional_int("MODBUS_SLAVE_ID"),

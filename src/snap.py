@@ -57,6 +57,9 @@ def main() -> None:
         rgb_camera = PiCamera(
             image_dir=settings.image_dir,
             camera_index=settings.rgb_camera_index,
+            width=settings.rgb_width,
+            height=settings.rgb_height,
+            quality=settings.rgb_quality,
         )
         LOGGER.info("Initialized RGB camera")
     except Exception as exc:
@@ -67,8 +70,10 @@ def main() -> None:
     try:
         from src.sensors.camera_ir import PiIRCamera, probe_lepton
         model = probe_lepton(
-            bus=settings.lepton_cci_bus,
-            address=settings.lepton_cci_address,
+            bus_number=settings.lepton_i2c_bus,
+            address=settings.lepton_i2c_address,
+            fallback_width=settings.lepton_width or 160,
+            fallback_height=settings.lepton_height or 120,
         )
         ir_camera = PiIRCamera(
             image_dir=settings.image_dir,
@@ -76,8 +81,11 @@ def main() -> None:
             spi_device=settings.lepton_spi_device,
             width=model.width,
             height=model.height,
-            colormap=settings.ir_colormap,
-            upscale_factor=settings.ir_upscale_factor,
+            colormap=settings.lepton_colormap,
+            upscale_factor=8,
+            reset_gpio=settings.lepton_reset_gpio,
+            i2c_bus=settings.lepton_i2c_bus,
+            i2c_address=settings.lepton_i2c_address,
         )
         LOGGER.info("Initialized FLIR Lepton IR camera")
     except Exception as exc:

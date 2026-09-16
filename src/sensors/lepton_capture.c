@@ -142,6 +142,12 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
                         int p20_off = pos + 20 * PACKET_BYTES;
                         uint8_t seg_id = (raw_buf[p20_off] >> 4) & 0x07;
                         if (seg_id >= 1 && seg_id <= 4) {
+                            if (seg_id == 1) {
+                                // New frame started: clear subsequent segments to prevent frame splicing
+                                segment_captured[1] = 0;
+                                segment_captured[2] = 0;
+                                segment_captured[3] = 0;
+                            }
                             // Copy this segment into our temporary segment buffers
                             memcpy(segments + (seg_id - 1) * 60 * PACKET_BYTES, raw_buf + pos, 60 * PACKET_BYTES);
                             segment_captured[seg_id - 1] = 1;
@@ -173,7 +179,11 @@ int capture_lepton_frame(const char* spidev_path, uint32_t speed_hz, uint16_t* o
         // Deassert CS (sleep 200ms) every 30 attempts if lost alignment
         if (attempt % 30 == 0) {
             close(fd);
-            usleep(200000); // 200ms CS HIGH VoSPI hardware resync
+            usleep(250000); // 250ms CS HIGH VoSPI hardware resync (meets FLIR >=185ms spec)
+            if (is_lepton3 && segments) {
+                memset(segment_captured, 0, 4);
+                memset(segments, 0, 4 * 60 * PACKET_BYTES);
+            }
             fd = open(spidev_path, O_RDWR);
             if (fd < 0) {
                 free(raw_buf);

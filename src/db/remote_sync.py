@@ -84,7 +84,7 @@ class RemoteSync:
         self.database.mark_synced("hvac_status", [row["id"] for row in hvac_rows])
         return len(env_rows) + len(hvac_rows)
 
-    def sync_images(self, max_uploads: int = 50) -> int:
+    def sync_images(self, max_uploads: int = 10) -> int:
         synced = 0
         timeout = max(self.timeout, 30.0)
         while synced < max_uploads:
@@ -112,7 +112,7 @@ class RemoteSync:
             for row in valid_rows:
                 path = Path(row["file_path"])
                 timestamp = self._public(row, ("timestamp",))["timestamp"]
-                LOGGER.info("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
+                LOGGER.debug("[RemoteSync] Uploading %s image (%s) to Server...", row["image_type"], path.name)
                 with path.open("rb") as image:
                     response = self.session.post(
                         self.image_endpoint,
@@ -128,7 +128,7 @@ class RemoteSync:
                 response.raise_for_status()
                 self.database.mark_synced("camera_logs", [row["id"]])
                 synced += 1
-                LOGGER.info("[RemoteSync] Successfully synced image: %s", path.name)
+                LOGGER.debug("[RemoteSync] Successfully synced image: %s", path.name)
                 if synced >= max_uploads:
                     break
 
@@ -136,9 +136,8 @@ class RemoteSync:
                 break
         return synced
 
-    def sync_all(self) -> int:
-        try:
-            return self.sync_metrics(batch_limit=50) + self.sync_images()
-        except Exception as exc:
-            LOGGER.debug("RemoteSync network error: %s (queued for next interval)", exc)
-            return 0
+    def sync_all(self, metrics_batch: int = 100, image_batch: int = 10) -> int:
+        """Sync unsynced metrics and images in a gentle, gradual batch. Raises on network errors."""
+        metrics_count = self.sync_metrics(batch_limit=metrics_batch)
+        images_count = self.sync_images(max_uploads=image_batch)
+        return metrics_count + images_count

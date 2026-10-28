@@ -1,6 +1,6 @@
-# Raspberry Pi 5 環境感測與雙相機邊緣節點 (Edge Sensor & HVAC Control System)
+# Raspberry Pi 5 環境感測與雙相機邊緣節點 (Edge Sensor & IR AC Remote)
 
-本專案部署於樹莓派 5 (Raspberry Pi 5) 邊緣端，主要任務為定時擷取環境溫濕度/CO2、控制常規與熱影像相機拍攝，以及透過 Modbus RTU 控制與記錄冷氣能耗，最後將資料庫暫存數據同步上傳至雲端伺服器。
+本專案部署於樹莓派 5 (Raspberry Pi 5) 邊緣端，主要任務為定時擷取環境溫濕度/CO2、控制常規與熱影像相機拍攝，以及透過 ESP32 紅外線遙控冷氣，最後將資料庫暫存數據同步上傳至雲端伺服器。
 
 ## 1. 系統硬體接線設計 (1-to-1 獨立配線)
 
@@ -79,7 +79,7 @@ CREATE TABLE env_metrics (
 );
 ```
 
-### 3.2 `hvac_status` (空調能耗與狀態表)
+### 3.2 `hvac_status` (舊的空調能耗表，已停止寫入；保留是為了與 Server 同步格式相容)
 ```sql
 CREATE TABLE hvac_status (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

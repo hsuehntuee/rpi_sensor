@@ -30,7 +30,7 @@ class Settings:
     api_key: str
     database_path: Path
     image_dir: Path
-    log_level: str = "INFO"
+    log_level: str = "WARNING"
     http_timeout_seconds: float = 10.0
     scd41_i2c_bus: int = 2
     scd41_poll_seconds: int = 300
@@ -51,12 +51,9 @@ class Settings:
     lepton_height: int | None = 120
     lepton_colormap: str = "rainbow"
     lepton_reset_gpio: int | None = None
-    modbus_port: str = "/dev/ttyUSB0"
-    modbus_baudrate: int = 9600
-    modbus_slave_id: int | None = None
-    modbus_state_register: int | None = None
-    modbus_control_register: int | None = None
-    modbus_power_register: int | None = None
+    ac_serial_port: str = "auto"
+    ac_protocol: str = ""
+    ac_name: str = ""
     edge_web_enabled: bool = True
     edge_web_host: str = "0.0.0.0"
     edge_web_port: int = 8080
@@ -95,7 +92,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         api_key=api_key,
         database_path=Path(raw_db_path),
         image_dir=Path(raw_img_dir),
-        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        log_level=os.getenv("LOG_LEVEL", "WARNING").upper(),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "10")),
         scd41_i2c_bus=_int("SCD41_I2C_BUS", "2"),
         scd41_poll_seconds=_int("SCD41_POLL_SECONDS", "300"),
@@ -116,12 +113,9 @@ def load_settings(env_file: str | None = None) -> Settings:
         lepton_height=_optional_int("LEPTON_HEIGHT") or 120,
         lepton_colormap=os.getenv("LEPTON_COLORMAP", "rainbow").lower(),
         lepton_reset_gpio=_optional_int("LEPTON_RESET_GPIO"),
-        modbus_port=os.getenv("MODBUS_PORT", "/dev/ttyUSB0"),
-        modbus_baudrate=int(os.getenv("MODBUS_BAUDRATE", "9600")),
-        modbus_slave_id=_optional_int("MODBUS_SLAVE_ID"),
-        modbus_state_register=_optional_int("MODBUS_STATE_REGISTER"),
-        modbus_control_register=_optional_int("MODBUS_CONTROL_REGISTER"),
-        modbus_power_register=_optional_int("MODBUS_POWER_REGISTER"),
+        ac_serial_port=os.getenv("AC_SERIAL_PORT", "auto").strip(),
+        ac_protocol=os.getenv("AC_PROTOCOL", "").strip().upper(),
+        ac_name=os.getenv("AC_NAME", "").strip(),
         edge_web_enabled=_bool("EDGE_WEB_ENABLED", True),
         edge_web_host=os.getenv("EDGE_WEB_HOST", "0.0.0.0").strip(),
         edge_web_port=_int("EDGE_WEB_PORT", "8080"),

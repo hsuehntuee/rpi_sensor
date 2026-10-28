@@ -30,6 +30,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# 冷氣遙控用（ESP32 USB 序列埠）。獨立一層安裝，樹莓派重建時不必重裝上面所有套件
+RUN pip install --no-cache-dir pyserial==3.5
 COPY src ./src
 COPY tests ./tests
 

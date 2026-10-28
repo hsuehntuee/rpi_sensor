@@ -10,11 +10,22 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.config import Settings
 from src.db.local_sqlite import LocalDatabase
+from src.web.health import collect_health
 
 LOGGER = logging.getLogger(__name__)
+
+
+class AcCommand(BaseModel):
+    """一次送出完整冷氣狀態（冷氣遙控器本來就是每按一次送全部設定）"""
+    power: bool
+    mode: str = "cool"
+    temp: float = 26
+    fan: str = "auto"
+    swing: bool = False
 
 
 def create_edge_app(
@@ -23,6 +34,7 @@ def create_edge_app(
     capture_callback: Callable[[], None] | None = None,
     sync_callback: Callable[[], int] | None = None,
     hardware_status: dict[str, Any] | None = None,
+    ac_remote: Any = None,
 ) -> FastAPI:
     """建立樹莓派邊緣節點專屬的 FastAPI 儀表板應用程式"""
     app = FastAPI(
@@ -67,7 +79,6 @@ def create_edge_app(
     def get_overview() -> dict[str, Any]:
         counts = database.get_counts()
         latest_env = database.get_latest_env(limit=15)
-        latest_hvac = database.get_latest_hvac(limit=15)
         latest_rgb = database.get_latest_cameras(limit=10, image_type="RGB")
         latest_ir = database.get_latest_cameras(limit=10, image_type="IR")
 
@@ -93,10 +104,8 @@ def create_edge_app(
                 "scd41": "Active",
                 "camera_rgb": "Active",
                 "camera_ir": "Active",
-                "hvac_modbus": "Configured" if settings.modbus_slave_id is not None else "Disabled",
             },
             "latest_env": latest_env,
-            "latest_hvac": latest_hvac,
             "latest_rgb_images": [_fmt_cam(c) for c in latest_rgb],
             "latest_ir_images": [_fmt_cam(c) for c in latest_ir],
         }
@@ -168,8 +177,7 @@ def create_edge_app(
         with action_lock:
             try:
                 capture_callback()
-            except Exception as exc:
-                LOGGER.exception("Manual instant capture failed: %s", exc)
+            except Exception as exc:  # 錯誤顯示在畫面上，不寫 log
                 raise HTTPException(status_code=500, detail=f"拍照失敗: {exc}")
 
             synced_count = 0
@@ -202,9 +210,46 @@ def create_edge_app(
                     "synced_count": synced_count,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
-            except Exception as exc:
-                LOGGER.exception("Manual sync failed: %s", exc)
+            except Exception as exc:  # 多半是網路問題，顯示在畫面上，不寫 log
                 raise HTTPException(status_code=500, detail=f"同步至伺服器失敗: {exc}")
+
+    @app.get("/api/v1/system/health")
+    def system_health() -> dict[str, Any]:
+        """需要客戶回報的狀況（儀表板最上方的示警區）"""
+        return collect_health(settings, database, hardware_status, ac_remote)
+
+    @app.get("/api/v1/ac")
+    def ac_status() -> dict[str, Any]:
+        """冷氣遙控狀態（IR 是單向的：state 是最後送出或從原廠遙控器聽到的設定）"""
+        latest = database.get_latest_env(limit=1)
+        result: dict[str, Any] = {
+            "name": settings.ac_name or settings.device_id,
+            "protocol": settings.ac_protocol,
+            "connected": False,
+            "room": latest[0] if latest else None,
+        }
+        if ac_remote is None:
+            return {**result, "error": "冷氣遙控未啟用 (AC_SERIAL_PORT=off)"}
+        try:
+            return {**result, **ac_remote.status()}
+        except Exception as exc:  # 顯示在面板上（附自行處理方法），不寫 log
+            return {**result, "error": str(exc)}
+
+    @app.post("/api/v1/ac")
+    def ac_set(command: AcCommand) -> dict[str, Any]:
+        if ac_remote is None:
+            raise HTTPException(status_code=503, detail="冷氣遙控未啟用 (AC_SERIAL_PORT=off)")
+        try:
+            ac_remote.set_state(**command.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"冷氣指令送出失敗: {exc}")
+        return ac_status()
+
+    @app.get("/ac", response_class=HTMLResponse)
+    def serve_ac_page() -> str:
+        return AC_PAGE_HTML
 
     @app.get("/dashboard", response_class=HTMLResponse)
     @app.get("/view", response_class=HTMLResponse)
@@ -215,1075 +260,642 @@ def create_edge_app(
     return app
 
 
+AC_PAGE_HTML = r"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>冷氣遙控</title>
+    <style>
+        :root {
+            --bg-body: #0e1117; --bg-card: #161b22; --bg-card-alt: #1c2230;
+            --text-main: #e6e9ef; --text-muted: #9aa3b2; --text-dim: #6b7486;
+            --accent-cyan: #4f8cff; --accent-emerald: #2fb67c; --accent-amber: #e5a23b;
+            --accent-rose: #ef5b5b; --accent-violet: #4f8cff;
+            --border-subtle: #262d3a; --border-bright: #353e4f;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif; background: var(--bg-body);
+               color: var(--text-main); padding: 20px 16px 40px; min-height: 100vh; }
+        .wrap { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+        a { color: var(--accent-cyan); text-decoration: none; font-size: 0.9rem; }
+        .card { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 16px;
+                padding: 20px; }
+        .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+        h1 { font-size: 1.3rem; font-weight: 800; }
+        .badge { font-size: 0.75rem; padding: 3px 10px; border-radius: 9999px; font-weight: 600; }
+        .on { background: rgba(16,185,129,0.15); color: var(--accent-emerald); border: 1px solid rgba(16,185,129,0.3); }
+        .off { background: rgba(244,63,94,0.12); color: var(--accent-rose); border: 1px solid rgba(244,63,94,0.3); }
+        .sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 6px; }
+        .temp-row { display: flex; align-items: center; justify-content: center; gap: 24px; margin: 8px 0 4px; }
+        .temp { font-size: 4.2rem; font-weight: 800; min-width: 3.2ch; text-align: center; font-variant-numeric: tabular-nums; }
+        .temp small { font-size: 1.4rem; color: var(--text-muted); }
+        .round { width: 56px; height: 56px; border-radius: 50%; font-size: 1.8rem; }
+        button { background: var(--bg-card-alt); color: var(--text-main); border: 1px solid var(--border-bright);
+                 border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 0.95rem; padding: 10px 0; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .power { width: 100%; padding: 14px; font-size: 1.1rem; }
+        .power.is-on { background: #1f6f4f; border-color: var(--accent-emerald); }
+        .label { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; margin-bottom: 8px; }
+        .seg { display: grid; gap: 8px; }
+        .seg.c5 { grid-template-columns: repeat(5, 1fr); }
+        .seg.c4 { grid-template-columns: repeat(4, 1fr); }
+        .seg button.active { background: var(--accent-cyan); border-color: var(--accent-cyan); color: #fff; }
+        .row { display: flex; justify-content: space-between; align-items: center; }
+        .status { font-size: 0.85rem; color: var(--text-muted); min-height: 1.2em; text-align: center; }
+        .status.err { color: var(--accent-rose); }
+        .room { display: flex; gap: 20px; font-size: 0.9rem; color: var(--text-muted); }
+        .room b { color: var(--text-main); font-size: 1.1rem; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <a href="/dashboard">← 回儀表板</a>
+
+    <div class="card">
+        <div class="head">
+            <h1 id="acName">冷氣</h1>
+            <span class="badge off" id="conn">連線中...</span>
+        </div>
+        <div class="sub" id="meta">--</div>
+        <div class="room" style="margin-top:12px;">
+            <span>室溫 <b id="roomTemp">--</b></span>
+            <span>濕度 <b id="roomHum">--</b></span>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="temp-row">
+            <button class="round" onclick="bumpTemp(-1)">−</button>
+            <div class="temp"><span id="temp">26</span><small>°C</small></div>
+            <button class="round" onclick="bumpTemp(1)">+</button>
+        </div>
+        <div class="status" id="status"></div>
+    </div>
+
+    <div class="card" style="display:flex; flex-direction:column; gap:18px;">
+        <button class="power" id="powerBtn" onclick="togglePower()">開機</button>
+        <div>
+            <div class="label">模式</div>
+            <div class="seg c5" id="modeSeg">
+                <button data-v="cool">冷氣</button><button data-v="dry">除濕</button>
+                <button data-v="fan">送風</button><button data-v="heat">暖氣</button>
+                <button data-v="auto">自動</button>
+            </div>
+        </div>
+        <div>
+            <div class="label">風速</div>
+            <div class="seg c4" id="fanSeg">
+                <button data-v="auto">自動</button><button data-v="low">弱</button>
+                <button data-v="medium">中</button><button data-v="high">強</button>
+            </div>
+        </div>
+        <div class="row">
+            <div class="label" style="margin:0;">擺風</div>
+            <button id="swingBtn" style="width:96px;" onclick="toggleSwing()">關</button>
+        </div>
+    </div>
+
+    <div class="sub" style="text-align:center;">
+        紅外線是單向的：畫面顯示的是最後送出（或接收頭聽到原廠遙控器）的設定，不一定等於冷氣實際狀態。
+    </div>
+</div>
+
+<script>
+    const state = {power: false, mode: 'cool', temp: 26, fan: 'auto', swing: false};
+    // dirty: 本地有改過但還沒送出（例如關機時先選模式），輪詢時不要蓋掉
+    let busy = false, dirty = false, tempTimer = null;
+
+    function render() {
+        document.getElementById('temp').textContent = state.temp;
+        const p = document.getElementById('powerBtn');
+        p.textContent = state.power ? '運轉中（按此關機）' : '開機';
+        p.classList.toggle('is-on', state.power);
+        for (const [seg, key] of [['modeSeg', 'mode'], ['fanSeg', 'fan']]) {
+            document.querySelectorAll('#' + seg + ' button').forEach(b =>
+                b.classList.toggle('active', b.dataset.v === state[key]));
+        }
+        document.getElementById('swingBtn').textContent = state.swing ? '開' : '關';
+    }
+
+    function setStatus(msg, err) {
+        const el = document.getElementById('status');
+        el.textContent = msg || '';
+        el.classList.toggle('err', !!err);
+    }
+
+    function applyInfo(info) {
+        document.getElementById('acName').textContent = info.name || '冷氣';
+        const c = document.getElementById('conn');
+        c.textContent = info.connected ? 'ESP32 已連線' : '未連線';
+        c.className = 'badge ' + (info.connected ? 'on' : 'off');
+        document.getElementById('meta').textContent = info.connected
+            ? `協定 ${info.protocol || '-'} · ${info.port}` : (info.error || '');
+        if (info.room) {
+            document.getElementById('roomTemp').textContent = info.room.temperature != null ? Number(info.room.temperature).toFixed(1) + ' °C' : '--';
+            document.getElementById('roomHum').textContent = info.room.humidity != null ? Number(info.room.humidity).toFixed(0) + ' %' : '--';
+        }
+        if (info.state && !busy && !dirty) {
+            Object.assign(state, {power: !!info.state.power, mode: info.state.mode || 'cool',
+                                  temp: Math.round(info.state.temp || 26), fan: info.state.fan || 'auto',
+                                  swing: !!info.state.swing});
+            if (!['auto', 'low', 'medium', 'high'].includes(state.fan)) state.fan = 'auto';
+            render();
+        }
+    }
+
+    async function refresh() {
+        try {
+            const r = await fetch('/api/v1/ac');
+            applyInfo(await r.json());
+        } catch (e) { setStatus('無法連到樹莓派', true); }
+    }
+
+    async function send() {
+        busy = true;
+        setStatus('送出中...');
+        try {
+            const r = await fetch('/api/v1/ac', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify(state)});
+            const j = await r.json();
+            if (!r.ok) throw new Error(j.detail || r.status);
+            busy = false;
+            dirty = false;
+            applyInfo(j);
+            setStatus('已送出 ' + new Date().toLocaleTimeString('zh-TW', {hour12: false}));
+        } catch (e) {
+            busy = false;
+            setStatus('送出失敗：' + e.message, true);
+            refresh();
+        }
+    }
+
+    function togglePower() { state.power = !state.power; dirty = true; render(); send(); }
+    function toggleSwing() { state.swing = !state.swing; dirty = true; render(); if (state.power) send(); }
+    function bumpTemp(d) {
+        state.temp = Math.max(16, Math.min(31, state.temp + d));
+        dirty = true;
+        render();
+        if (!state.power) return;
+        clearTimeout(tempTimer);
+        tempTimer = setTimeout(send, 500);  // 連按只送最後一次
+    }
+    for (const [seg, key] of [['modeSeg', 'mode'], ['fanSeg', 'fan']]) {
+        document.querySelectorAll('#' + seg + ' button').forEach(b => b.onclick = () => {
+            state[key] = b.dataset.v; dirty = true; render(); if (state.power) send();
+        });
+    }
+
+    render();
+    refresh();
+    setInterval(() => { if (!busy) refresh(); }, 10000);
+</script>
+</body>
+</html>
+"""
+
+
 EDGE_DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🍓 RPi 5 邊緣節點即時儀表板 (Edge Local Dashboard)</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <title>邊緣節點監控</title>
     <style>
         :root {
-            --bg-body: #0b0f19;
-            --bg-card: #151d30;
-            --bg-card-alt: #1c2742;
-            --bg-card-hover: #223052;
-            --text-main: #f1f5f9;
-            --text-muted: #94a3b8;
-            --text-dim: #64748b;
-            --accent-rpi: #ff3366;
-            --accent-cyan: #38bdf8;
-            --accent-emerald: #10b981;
-            --accent-amber: #f59e0b;
-            --accent-rose: #f43f5e;
-            --accent-violet: #a855f7;
-            --border-subtle: #1e293b;
-            --border-bright: #334155;
-            --glass-bg: rgba(21, 29, 48, 0.75);
+            --bg: #0e1117;
+            --surface: #161b22;
+            --surface-2: #1c2230;
+            --border: #262d3a;
+            --border-strong: #353e4f;
+            --text: #e6e9ef;
+            --muted: #9aa3b2;
+            --dim: #6b7486;
+            --accent: #4f8cff;
+            --ok: #2fb67c;
+            --warn: #e5a23b;
+            --crit: #ef5b5b;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            background-color: var(--bg-body);
-            color: var(--text-main);
-            padding: 20px 16px 40px;
-            min-height: 100vh;
+            font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+            background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5;
         }
-        .container { max-width: 1400px; margin: 0 auto; }
-        
-        /* Header */
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 16px;
-            padding: 16px 20px;
-            background: var(--bg-card);
-            border: 1px solid var(--border-subtle);
-            border-radius: 16px;
-            margin-bottom: 20px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-        }
-        .header-title-area { display: flex; align-items: center; gap: 14px; }
-        .node-icon {
-            font-size: 2rem;
-            width: 48px;
-            height: 48px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255, 51, 102, 0.12);
-            border-radius: 12px;
-            border: 1px solid rgba(255, 51, 102, 0.3);
-        }
-        .header-text h1 {
-            font-size: 1.35rem;
-            font-weight: 800;
-            letter-spacing: -0.02em;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .badges-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 6px;
-            flex-wrap: wrap;
-        }
-        .badge {
-            font-size: 0.75rem;
-            padding: 3px 9px;
-            border-radius: 9999px;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-        }
-        .badge-live {
-            background: rgba(16, 185, 129, 0.15);
-            color: var(--accent-emerald);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-        }
-        .badge-live::before {
-            content: "";
-            width: 6px;
-            height: 6px;
-            background: var(--accent-emerald);
-            border-radius: 50%;
-            display: inline-block;
-            box-shadow: 0 0 6px var(--accent-emerald);
-        }
-        .badge-dev {
-            background: rgba(56, 189, 248, 0.12);
-            color: var(--accent-cyan);
-            border: 1px solid rgba(56, 189, 248, 0.25);
-            font-family: 'JetBrains Mono', monospace;
-        }
-        .badge-server {
-            background: rgba(168, 85, 247, 0.12);
-            color: var(--accent-violet);
-            border: 1px solid rgba(168, 85, 247, 0.25);
-            font-family: 'JetBrains Mono', monospace;
-        }
+        a { color: var(--accent); text-decoration: none; }
+        .page { max-width: 1320px; margin: 0 auto; padding: 20px 16px 48px; display: flex; flex-direction: column; gap: 16px; }
 
-        /* Action Buttons */
-        .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        /* Top bar */
+        .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .brand h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.01em; }
+        .brand .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 2px; }
+        .brand .meta b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; }
         .btn {
-            background: #2563eb;
-            color: white;
-            border: 1px solid rgba(255,255,255,0.1);
-            padding: 9px 16px;
-            border-radius: 10px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 0.85rem;
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong);
+            padding: 7px 14px; border-radius: 8px; font: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
         }
-        .btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35); }
-        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-        .btn-rpi {
-            background: linear-gradient(135deg, #e11d48, #be123c);
-            border-color: rgba(225, 29, 72, 0.4);
-        }
-        .btn-rpi:hover:not(:disabled) { box-shadow: 0 4px 14px rgba(225, 29, 72, 0.45); }
-        .btn-sync {
-            background: linear-gradient(135deg, #0284c7, #0369a1);
-            border-color: rgba(2, 132, 199, 0.4);
-        }
-        .btn-sync:hover:not(:disabled) { box-shadow: 0 4px 14px rgba(2, 132, 199, 0.45); }
-        .btn-outline {
-            background: rgba(30, 41, 59, 0.6);
-            border: 1px solid var(--border-bright);
-            color: var(--text-muted);
-        }
-        .btn-outline:hover:not(:disabled) { background: var(--bg-card-alt); color: var(--text-main); }
-        .btn-outline.active {
-            background: rgba(16, 185, 129, 0.15);
-            color: var(--accent-emerald);
-            border-color: rgba(16, 185, 129, 0.4);
-        }
+        .btn:hover:not(:disabled) { border-color: var(--muted); }
+        .btn:disabled { opacity: 0.55; cursor: progress; }
+        .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .btn.on { color: var(--ok); border-color: rgba(47,182,124,0.5); }
 
-        /* Banner / Notification Toast */
-        #toastNotice {
-            display: none;
-            padding: 12px 18px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            animation: fadeIn 0.3s;
-        }
-        .toast-success { background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); color: #34d399; }
-        .toast-error { background: rgba(244, 63, 94, 0.15); border: 1px solid rgba(244, 63, 94, 0.4); color: #fb7185; }
+        /* Card */
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+        .card-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); gap: 8px; flex-wrap: wrap; }
+        .card-head h2 { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+        .card-body { padding: 16px; }
 
-        /* Stats Grid */
-        .grid-stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-        .stat-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border-subtle);
-            border-radius: 14px;
-            padding: 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            position: relative;
-            overflow: hidden;
-            transition: transform 0.2s, border-color 0.2s;
-        }
-        .stat-card:hover { transform: translateY(-2px); border-color: var(--border-bright); }
-        .stat-card::after {
-            content: "";
-            position: absolute;
-            top: 0; left: 0; right: 0; height: 3px;
-            background: transparent;
-        }
-        .stat-card.temp::after { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
-        .stat-card.hum::after { background: linear-gradient(90deg, #38bdf8, #0ea5e9); }
-        .stat-card.co2::after { background: linear-gradient(90deg, #10b981, #34d399); }
-        .stat-card.hvac::after { background: linear-gradient(90deg, #a855f7, #c084fc); }
-        .stat-card.db::after { background: linear-gradient(90deg, #ff3366, #f43f5e); }
-        .stat-card.queue::after { background: linear-gradient(90deg, #06b6d4, #3b82f6); }
+        /* Health banner */
+        .health { border-left: 4px solid var(--ok); }
+        .health.warn { border-left-color: var(--warn); }
+        .health.crit { border-left-color: var(--crit); }
+        .health-summary { display: flex; align-items: center; gap: 10px; padding: 14px 16px; font-weight: 700; }
+        .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
+        .dot.warn { background: var(--warn); } .dot.crit { background: var(--crit); }
+        .health-summary small { font-weight: 400; color: var(--muted); margin-left: auto; font-size: 12px; }
+        .alert-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+        .alert { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+        .alert:last-child { border-bottom: 0; }
+        .alert .tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; align-self: start; margin-top: 2px; }
+        .alert .tag.contact { background: rgba(239,91,91,0.15); color: var(--crit); }
+        .alert .tag.self { background: rgba(229,162,59,0.15); color: var(--warn); }
+        .alert .title { font-weight: 700; }
+        .alert .detail { grid-column: 2; color: var(--muted); }
+        .alert .action { grid-column: 2; color: var(--text); font-size: 13px; }
+        .alert .action::before { content: "→ "; color: var(--dim); }
 
-        .stat-title { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-        .stat-val { font-size: 1.85rem; font-weight: 800; line-height: 1.1; }
-        .stat-sub { font-size: 0.75rem; color: var(--text-dim); }
+        /* KPIs */
+        .kpis { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        @media (min-width: 640px) { .kpis { grid-template-columns: repeat(3, 1fr); } }
+        @media (min-width: 1100px) { .kpis { grid-template-columns: repeat(6, 1fr); } }
+        .kpi { padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-height: 104px; }
+        a.kpi { color: inherit; }
+        a.kpi:hover { border-color: var(--border-strong); }
+        .kpi .label { font-size: 12px; color: var(--muted); font-weight: 600; }
+        .kpi .value { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
+        .kpi .value small { font-size: 14px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+        .kpi .sub { font-size: 12px; color: var(--dim); }
+        .bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+        .bar > i { display: block; height: 100%; background: var(--accent); width: 0; }
+        .ok-text { color: var(--ok); } .warn-text { color: var(--warn); } .crit-text { color: var(--crit); }
 
-        /* Camera Section */
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        .section-title {
-            font-size: 1.15rem;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .camera-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-bottom: 28px;
-        }
-        @media (max-width: 840px) {
-            .camera-grid { grid-template-columns: 1fr; }
-        }
-        .camera-card {
-            background: var(--bg-card);
-            border: 1px solid var(--border-subtle);
-            border-radius: 14px;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-        }
-        .camera-header {
-            padding: 12px 18px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: rgba(11, 15, 25, 0.6);
-            border-bottom: 1px solid var(--border-subtle);
-        }
-        .camera-title { font-weight: 700; font-size: 0.95rem; display: flex; align-items: center; gap: 8px; }
-        .camera-meta { font-size: 0.8rem; color: var(--text-muted); }
-        .camera-img-box {
-            width: 100%;
-            height: 380px;
-            background: #060911;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            position: relative;
-            overflow: hidden;
-        }
-        .camera-img-box img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            cursor: pointer;
-            transition: transform 0.25s ease;
-        }
-        .camera-img-box img:hover { transform: scale(1.03); }
-        .camera-empty-placeholder {
-            color: var(--text-dim);
-            font-size: 0.9rem;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 8px;
-        }
-        .camera-footer {
-            padding: 12px 18px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            border-top: 1px solid var(--border-subtle);
-            background: rgba(11, 15, 25, 0.4);
-        }
-        .camera-footer a { color: var(--accent-cyan); text-decoration: none; font-weight: 600; }
-        .camera-footer a:hover { text-decoration: underline; }
-        .sync-tag {
-            font-size: 0.7rem;
-            padding: 2px 7px;
-            border-radius: 4px;
-            font-weight: 600;
-        }
-        .sync-tag.synced { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-        .sync-tag.pending { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        /* Cameras */
+        .cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+        .cam-frame { aspect-ratio: 4 / 3; background: #0a0d12; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .cam-frame img { width: 100%; height: 100%; object-fit: contain; cursor: zoom-in; display: none; }
+        .cam-empty { color: var(--dim); font-size: 13px; text-align: center; padding: 16px; }
+        .cam-foot { display: flex; justify-content: space-between; gap: 8px; padding: 10px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); flex-wrap: wrap; }
+        .pill { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--muted); }
+        .pill.synced { color: var(--ok); border-color: rgba(47,182,124,0.4); }
+        .pill.pending { color: var(--warn); border-color: rgba(229,162,59,0.4); }
 
-        /* Tabs and Data Tables */
-        .tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; overflow-x: auto; }
-        .tab-btn {
-            background: transparent;
-            border: none;
-            color: var(--text-muted);
-            padding: 9px 18px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 0.88rem;
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
-        .tab-btn:hover { background: var(--bg-card); color: var(--text-main); }
-        .tab-btn.active { background: var(--bg-card-alt); color: var(--text-main); border-bottom: 2px solid var(--accent-cyan); }
-        
-        .table-wrap {
-            background: var(--bg-card);
-            border: 1px solid var(--border-subtle);
-            border-radius: 14px;
-            overflow-x: auto;
-        }
-        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.875rem; }
-        th { background: rgba(11, 15, 25, 0.6); padding: 13px 18px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border-subtle); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
-        td { padding: 13px 18px; border-bottom: 1px solid rgba(30, 41, 59, 0.7); }
-        tr:last-child td { border-bottom: none; }
-        tr:hover td { background: rgba(30, 41, 59, 0.35); }
+        /* Tabs */
+        .tabs { display: flex; gap: 4px; padding: 6px 8px 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
+        .tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 10px 12px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+        .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+        .panel { display: none; }
+        .panel.active { display: block; }
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+        th, td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+        th { font-size: 12px; color: var(--muted); font-weight: 600; background: var(--surface-2); }
+        tr:last-child td { border-bottom: 0; }
+        .empty { text-align: center; color: var(--dim); padding: 28px; }
 
-        /* Gallery */
-        .gallery-filter {
-            display: flex;
-            gap: 8px;
-            padding: 16px 18px 0;
-            align-items: center;
-        }
-        .gallery-filter button {
-            background: transparent;
-            border: 1px solid var(--border-bright);
-            color: var(--text-muted);
-            padding: 4px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.8rem;
-        }
-        .gallery-filter button.active { background: var(--accent-cyan); color: #0b0f19; border-color: var(--accent-cyan); font-weight: 700; }
-        .gallery-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            gap: 14px;
-            padding: 18px;
-        }
-        .gallery-item {
-            background: #060911;
-            border: 1px solid var(--border-subtle);
-            border-radius: 10px;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            transition: transform 0.2s, border-color 0.2s;
-        }
-        .gallery-item:hover { transform: translateY(-3px); border-color: var(--accent-cyan); }
-        .gallery-item img {
-            width: 100%;
-            height: 135px;
-            object-fit: cover;
-            cursor: pointer;
-        }
-        .gallery-meta { padding: 8px 10px; font-size: 0.75rem; color: var(--text-muted); display: flex; justify-content: space-between; align-items: center; background: rgba(11, 15, 25, 0.8); }
+        .gallery-tools { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 12px 16px; }
+        .seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden; }
+        .seg button { background: none; border: 0; color: var(--muted); padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+        .seg button.active { background: var(--surface-2); color: var(--text); }
+        select { background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 13px; }
+        .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; padding: 0 16px 16px; }
+        .thumb { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #0a0d12; }
+        .thumb img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; display: block; cursor: zoom-in; }
+        .thumb div { display: flex; justify-content: space-between; padding: 6px 8px; font-size: 11px; color: var(--dim); }
 
-        /* Hardware Info Panel */
-        .hw-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 16px;
-            padding: 20px;
-        }
-        .hw-item {
-            background: var(--bg-body);
-            border: 1px solid var(--border-subtle);
-            border-radius: 10px;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .hw-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; font-weight: 600; }
-        .hw-val { font-size: 0.95rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+        .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+        .kv > div { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+        .kv dt { font-size: 12px; color: var(--muted); }
+        .kv dd { font-weight: 600; word-break: break-all; }
 
-        /* Modal Lightbox */
-        .modal {
-            display: none;
-            position: fixed;
-            z-index: 1000;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(4, 7, 13, 0.9);
-            backdrop-filter: blur(8px);
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-        }
-        .modal.open { display: flex; }
-        .modal-content {
-            max-width: 94vw;
-            max-height: 92vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 12px;
-            cursor: default;
-        }
-        .modal img { max-width: 92vw; max-height: 84vh; border-radius: 10px; box-shadow: 0 0 40px rgba(0,0,0,0.9); border: 1px solid rgba(255,255,255,0.1); }
-        .modal-close {
-            position: absolute;
-            top: 24px;
-            right: 28px;
-            color: var(--text-main);
-            font-size: 2rem;
-            cursor: pointer;
-            line-height: 1;
-        }
-
-        /* Spinner */
-        .spinner {
-            display: inline-block;
-            width: 14px;
-            height: 14px;
-            border: 2px solid rgba(255,255,255,0.3);
-            border-radius: 50%;
-            border-top-color: #fff;
-            animation: spin 0.8s linear infinite;
-        }
+        /* Toast & modal */
+        #toast { position: fixed; right: 16px; bottom: 16px; max-width: min(420px, calc(100vw - 32px)); padding: 12px 16px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border-strong); display: none; z-index: 20; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+        #toast.ok { border-color: rgba(47,182,124,0.6); } #toast.err { border-color: rgba(239,91,91,0.6); }
+        #modal { position: fixed; inset: 0; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; z-index: 30; padding: 16px; }
+        #modal.open { display: flex; }
+        #modal img { max-width: 100%; max-height: 85vh; }
+        #modal div { color: var(--muted); font-size: 13px; }
+        .spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header>
-            <div class="header-title-area">
-                <div class="node-icon">🍓</div>
-                <div class="header-text">
-                    <h1>樹莓派 5 邊緣節點即時儀表板 <span style="font-size: 0.85rem; color: var(--accent-rpi); font-weight: 600;">(Edge Local)</span></h1>
-                    <div class="badges-row">
-                        <span class="badge badge-live">節點運行中</span>
-                        <span class="badge" style="background:rgba(56,189,248,0.15); color:var(--accent-cyan); font-family:'JetBrains Mono',monospace;">台北時間 (GMT+8)</span>
-                        <span class="badge badge-dev" id="badgeDeviceId">Device: rpi_edge</span>
-                        <span class="badge badge-server" id="badgeServerUrl">Server: Connecting...</span>
-                        <span style="font-size: 0.78rem; color: var(--text-dim); margin-left: 4px;" id="lastUpdated">更新中...</span>
-                    </div>
-                </div>
-            </div>
-            <div class="controls">
-                <button class="btn btn-rpi" id="btnSnap" onclick="triggerInstantCapture()">
-                    <span>📸</span> 立即拍照與同步
-                </button>
-                <button class="btn btn-sync" id="btnSync" onclick="triggerInstantSync()">
-                    <span>📡</span> 立即同步至 Server
-                </button>
-                <button class="btn btn-outline active" id="btnToggleAuto" onclick="toggleAutoRefresh()">
-                    自動更新: 15s
-                </button>
-                <button class="btn btn-outline" onclick="fetchData()">
-                    🔄 刷新
-                </button>
-            </div>
-        </header>
-
-        <!-- Notification Toast -->
-        <div id="toastNotice">
-            <span id="toastMsg"></span>
-            <span style="cursor:pointer; opacity:0.7;" onclick="hideToast()">✕</span>
-        </div>
-
-        <!-- Metric Stat Cards -->
-        <div class="grid-stats">
-            <div class="stat-card temp">
-                <div class="stat-title">🌡️ SCD41 最新溫度</div>
-                <div class="stat-val" id="statTemp" style="color: var(--accent-amber);">-- °C</div>
-                <div class="stat-sub" id="statTempTime">等待取樣...</div>
-            </div>
-            <div class="stat-card hum">
-                <div class="stat-title">💧 SCD41 最新濕度</div>
-                <div class="stat-val" id="statHum" style="color: var(--accent-cyan);">-- %</div>
-                <div class="stat-sub" id="statHumTime">等待取樣...</div>
-            </div>
-            <div class="stat-card co2">
-                <div class="stat-title">🌿 CO2 二氧化碳濃度</div>
-                <div class="stat-val" id="statCo2" style="color: var(--accent-emerald);">-- ppm</div>
-                <div class="stat-sub" id="statCo2Status">正常品質</div>
-            </div>
-            <div class="stat-card hvac">
-                <div class="stat-title">❄️ HVAC 冷氣狀態 / 功率</div>
-                <div class="stat-val" id="statHvac">--</div>
-                <div class="stat-sub" id="statHvacPower">0.0 W</div>
-            </div>
-            <div class="stat-card db">
-                <div class="stat-title">📦 本地資料庫總筆數</div>
-                <div class="stat-val" id="statTotal" style="color: var(--accent-rose);">0 筆</div>
-                <div class="stat-sub" id="statCamCount">RGB: 0 | IR: 0</div>
-            </div>
-            <div class="stat-card queue">
-                <div class="stat-title">⏳ 待上傳同步隊列 (Queue)</div>
-                <div class="stat-val" id="statQueue" style="color: var(--accent-cyan);">0 筆</div>
-                <div class="stat-sub" id="statQueueDetail">本地完全同步</div>
+<div class="page">
+    <div class="topbar">
+        <div class="brand">
+            <h1>邊緣節點監控</h1>
+            <div class="meta">
+                <span>裝置 <b id="deviceId">--</b></span>
+                <span>Server <b id="serverUrl">--</b></span>
+                <span id="lastUpdated">更新中…</span>
             </div>
         </div>
-
-        <!-- Latest Dual Camera Side-by-Side -->
-        <div class="section-header">
-            <div class="section-title">
-                <span>📷 本地最新雙相機拍攝畫面 (RGB & FLIR Lepton IR 熱影像)</span>
-            </div>
-            <span style="font-size: 0.82rem; color: var(--text-dim);">每 <span id="sampleIntervalText">5</span> 分鐘排程取樣 | 顯示時間為 <strong>GMT+8 台北時間</strong></span>
+        <div class="actions">
+            <a class="btn" href="/ac">冷氣遙控</a>
+            <button class="btn primary" id="btnSnap" onclick="runAction('capture', this)">立即拍照</button>
+            <button class="btn" id="btnSync" onclick="runAction('sync', this)">立即同步</button>
+            <button class="btn on" id="btnAuto" onclick="toggleAuto()">自動更新 15s</button>
         </div>
+    </div>
 
-        <div class="camera-grid">
-            <!-- RGB Camera Card -->
-            <div class="camera-card">
-                <div class="camera-header">
-                    <span class="camera-title">🟢 RGB 可見光相機 (PiCamera)</span>
-                    <span class="camera-meta" id="rgbTime">--</span>
-                </div>
-                <div class="camera-img-box" id="rgbImgBox">
-                    <img id="rgbImg" src="" alt="RGB 影像" style="display:none;" onerror="handleImageError('rgb')" onclick="openModal(this.src, '🟢 RGB 可見光相機畫面')">
-                    <div id="rgbPlaceholder" class="camera-empty-placeholder">
-                        <span style="font-size:2.5rem;">📷</span>
-                        <span>等待 RGB 拍攝取樣...</span>
-                    </div>
-                    <div id="rgbErrorCard" class="camera-error-box" style="display:none; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:16px; text-align:center;">
-                        <span style="font-size:2rem;">⚠️</span>
-                        <div style="font-weight:700; color:var(--accent-rose); font-size:0.9rem;">RGB 照片讀取失敗 (檔案未生成或損毀)</div>
-                        <div id="rgbErrorDetail" style="font-size:0.75rem; color:var(--text-muted); max-width:85%; word-break:break-all;"></div>
-                        <button class="btn btn-outline" style="padding:4px 10px; font-size:0.75rem; margin-top:4px;" onclick="triggerInstantCapture()">📸 重新拍照</button>
-                    </div>
-                </div>
-                <div class="camera-footer">
-                    <div>
-                        <span id="rgbSize">大小: --</span>
-                        <span id="rgbSyncTag" class="sync-tag" style="margin-left:8px; display:none;">已同步</span>
-                    </div>
-                    <a id="rgbLink" href="#" target="_blank" style="display:none;">🔍 查看原圖</a>
-                </div>
-            </div>
+    <!-- 系統狀態：需要客戶回報的狀況都在這裡 -->
+    <section class="card health" id="health">
+        <div class="health-summary"><span class="dot" id="healthDot"></span><span id="healthText">檢查系統狀態中…</span><small id="healthHint"></small></div>
+        <div class="alert-list" id="alertList" style="display:none;"></div>
+    </section>
 
-            <!-- IR Camera Card -->
-            <div class="camera-card">
-                <div class="camera-header">
-                    <span class="camera-title">🔴 FLIR Lepton IR 熱影像 (Lepton 3.X)</span>
-                    <span class="camera-meta" id="irTime">--</span>
-                </div>
-                <div class="camera-img-box" id="irImgBox">
-                    <img id="irImg" src="" alt="IR 影像" style="display:none;" onerror="handleImageError('ir')" onclick="openModal(this.src, '🔴 FLIR Lepton IR 熱感應畫面')">
-                    <div id="irPlaceholder" class="camera-empty-placeholder">
-                        <span style="font-size:2.5rem;">🔥</span>
-                        <span>等待 IR 拍攝取樣...</span>
-                    </div>
-                    <div id="irErrorCard" class="camera-error-box" style="display:none; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:16px; text-align:center;">
-                        <span style="font-size:2rem;">⚠️</span>
-                        <div style="font-weight:700; color:var(--accent-rose); font-size:0.9rem;">IR 照片讀取失敗 (檔案未生成或損毀)</div>
-                        <div id="irErrorDetail" style="font-size:0.75rem; color:var(--text-muted); max-width:85%; word-break:break-all;"></div>
-                        <button class="btn btn-outline" style="padding:4px 10px; font-size:0.75rem; margin-top:4px;" onclick="triggerInstantCapture()">📸 重新拍照</button>
-                    </div>
-                </div>
-                <div class="camera-footer">
-                    <div>
-                        <span id="irSize">大小: --</span>
-                        <span id="irSyncTag" class="sync-tag" style="margin-left:8px; display:none;">已同步</span>
-                    </div>
-                    <a id="irLink" href="#" target="_blank" style="display:none;">🔍 查看原圖</a>
-                </div>
-            </div>
+    <section class="kpis">
+        <div class="card kpi"><span class="label">溫度</span><span class="value" id="kTemp">--</span><span class="sub" id="kEnvTime">--</span></div>
+        <div class="card kpi"><span class="label">相對濕度</span><span class="value" id="kHum">--</span><span class="sub">SCD41</span></div>
+        <div class="card kpi"><span class="label">CO₂</span><span class="value" id="kCo2">--</span><span class="sub" id="kCo2Note">--</span></div>
+        <a class="card kpi" href="/ac"><span class="label">冷氣遙控</span><span class="value" id="kAc" style="font-size:20px;">--</span><span class="sub" id="kAcSub">開啟控制頁面 →</span></a>
+        <div class="card kpi"><span class="label">儲存空間</span><span class="value" id="kDisk">--</span><div class="bar"><i id="kDiskBar"></i></div><span class="sub" id="kDiskSub">--</span></div>
+        <div class="card kpi"><span class="label">待上傳</span><span class="value" id="kQueue">--</span><span class="sub" id="kQueueSub">--</span></div>
+    </section>
+
+    <section class="cams">
+        <div class="card">
+            <div class="card-head"><h2>RGB 相機</h2><span class="sub" id="rgbTime" style="font-size:12px;color:var(--dim);">--</span></div>
+            <div class="cam-frame"><img id="rgbImg" alt="RGB"><div class="cam-empty" id="rgbEmpty">尚無照片</div></div>
+            <div class="cam-foot"><span id="rgbSize">--</span><span><span class="pill" id="rgbSync" style="display:none;"></span> <a id="rgbLink" href="#" target="_blank" style="display:none;">原圖</a></span></div>
         </div>
+        <div class="card">
+            <div class="card-head"><h2>熱影像 (FLIR Lepton)</h2><span class="sub" id="irTime" style="font-size:12px;color:var(--dim);">--</span></div>
+            <div class="cam-frame"><img id="irImg" alt="IR"><div class="cam-empty" id="irEmpty">尚無照片</div></div>
+            <div class="cam-foot"><span id="irSize">--</span><span><span class="pill" id="irSync" style="display:none;"></span> <a id="irLink" href="#" target="_blank" style="display:none;">原圖</a></span></div>
+        </div>
+    </section>
 
-        <!-- Tabs Navigation -->
+    <section class="card">
         <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('env', this)">📊 環境感測記錄 (SCD41)</button>
-            <button class="tab-btn" onclick="switchTab('hvac', this)">❄️ HVAC 冷氣記錄</button>
-            <button class="tab-btn" onclick="switchTab('gallery', this)">🖼️ 本地相片藝廊</button>
-            <button class="tab-btn" onclick="switchTab('hardware', this)">🔌 硬體與系統狀態</button>
+            <button class="tab active" data-tab="env">環境紀錄</button>
+            <button class="tab" data-tab="gallery">相片</button>
+            <button class="tab" data-tab="system">系統資訊</button>
         </div>
-
-        <!-- SCD41 Table -->
-        <div id="tabEnv" class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>取樣時間 (GMT+8 台北時間)</th>
-                        <th>溫度 (°C)</th>
-                        <th>濕度 (%)</th>
-                        <th>CO2 (ppm)</th>
-                        <th>同步狀態</th>
-                    </tr>
-                </thead>
-                <tbody id="envTableBody">
-                    <tr><td colspan="6" style="text-align: center; color: var(--text-dim); padding:24px;">載入中...</td></tr>
-                </tbody>
-            </table>
+        <div class="panel active" id="panel-env">
+            <div class="table-wrap"><table>
+                <thead><tr><th>#</th><th>時間 (台北)</th><th>溫度 °C</th><th>濕度 %</th><th>CO₂ ppm</th><th>上傳</th></tr></thead>
+                <tbody id="envRows"><tr><td colspan="6" class="empty">載入中…</td></tr></tbody>
+            </table></div>
         </div>
-
-        <!-- HVAC Table -->
-        <div id="tabHvac" class="table-wrap" style="display: none;">
-            <table>
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>記錄時間 (GMT+8 台北時間)</th>
-                        <th>運轉狀態</th>
-                        <th>耗電功率 (W)</th>
-                        <th>同步狀態</th>
-                    </tr>
-                </thead>
-                <tbody id="hvacTableBody">
-                    <tr><td colspan="5" style="text-align: center; color: var(--text-dim); padding:24px;">載入中...</td></tr>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- Gallery Tab -->
-        <div id="tabGallery" class="table-wrap" style="display: none;">
-            <div class="gallery-filter" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:center;">
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">類型：</span>
-                    <button class="active" onclick="filterGallery('ALL', this)">全部 (<span id="countAllImgs">0</span>)</button>
-                    <button onclick="filterGallery('RGB', this)">RGB 可見光 (<span id="countRgbImgs">0</span>)</button>
-                    <button onclick="filterGallery('IR', this)">IR 熱影像 (<span id="countIrImgs">0</span>)</button>
+        <div class="panel" id="panel-gallery">
+            <div class="gallery-tools">
+                <div class="seg" id="galleryFilter">
+                    <button class="active" data-f="ALL">全部 <span id="cAll">0</span></button>
+                    <button data-f="RGB">RGB <span id="cRgb">0</span></button>
+                    <button data-f="IR">熱影像 <span id="cIr">0</span></button>
                 </div>
-                <div style="display:flex; align-items:center; gap:8px;">
-                    <span style="font-size:0.8rem; color:var(--text-muted); font-weight:600;">顯示最新：</span>
-                    <select id="galleryLimitSelect" onchange="changeGalleryLimit(this.value)" style="background:var(--bg-body); color:var(--text-main); border:1px solid var(--border-bright); border-radius:6px; padding:4px 8px; font-size:0.8rem; cursor:pointer;">
-                        <option value="20">最新 20 筆</option>
-                        <option value="40">最新 40 筆</option>
-                        <option value="60" selected>最新 60 筆 (預設)</option>
-                        <option value="100">最新 100 筆</option>
-                        <option value="200">最新 200 筆</option>
-                    </select>
-                    <button onclick="fetchGalleryData(true)" style="background:transparent; border:1px solid var(--border-bright); color:var(--text-muted); padding:4px 10px; border-radius:6px; font-size:0.8rem; cursor:pointer;" title="重新整理相簿">🔄 重新整理</button>
-                </div>
+                <select id="galleryLimit">
+                    <option value="20">最新 20 張</option><option value="60" selected>最新 60 張</option>
+                    <option value="100">最新 100 張</option><option value="200">最新 200 張</option>
+                </select>
             </div>
-            <div class="gallery-grid" id="galleryContainer">
-                <div style="grid-column: 1/-1; text-align: center; color: var(--text-dim); padding: 30px;">載入本地相片中...</div>
-            </div>
+            <div class="gallery" id="gallery"><div class="empty" style="grid-column:1/-1;">載入中…</div></div>
         </div>
-
-        <!-- Hardware & System Info Tab -->
-        <div id="tabHardware" class="table-wrap" style="display: none;">
-            <div class="hw-grid" id="hwGridContainer">
-                <div class="hw-item">
-                    <div class="hw-label">🍓 設備識別碼 (Device ID)</div>
-                    <div class="hw-val" id="hwDeviceId">--</div>
-                </div>
-                <div class="hw-item">
-                    <div class="hw-label">📡 遠端伺服器 (Server Target)</div>
-                    <div class="hw-val" id="hwServerUrl">--</div>
-                </div>
-                <div class="hw-item">
-                    <div class="hw-label">🌡️ SCD41 感測器</div>
-                    <div class="hw-val" style="color:var(--accent-emerald);">已啟用 (I2C Bus 2)</div>
-                </div>
-                <div class="hw-item">
-                    <div class="hw-label">📷 RGB 可見光相機</div>
-                    <div class="hw-val" style="color:var(--accent-cyan);">PiCamera (rpicam-apps)</div>
-                </div>
-                <div class="hw-item">
-                    <div class="hw-label">🔴 FLIR Lepton 3.X IR</div>
-                    <div class="hw-val" style="color:var(--accent-rose);">SPI Kernel Driver (160x120)</div>
-                </div>
-                <div class="hw-item">
-                    <div class="hw-label">❄️ HVAC Modbus 監控</div>
-                    <div class="hw-val" id="hwHvacStatus">--</div>
-                </div>
-            </div>
+        <div class="panel" id="panel-system">
+            <dl class="kv" id="systemInfo"></dl>
         </div>
-    </div>
+    </section>
+</div>
 
-    <!-- Image Lightbox Modal -->
-    <div id="imgModal" class="modal" onclick="closeModal()">
-        <span class="modal-close" onclick="closeModal()">✕</span>
-        <div class="modal-content" onclick="event.stopPropagation()">
-            <img id="modalImg" src="">
-            <div id="modalTitle" style="color:var(--text-muted); font-size:0.9rem; font-weight:600;"></div>
-        </div>
-    </div>
+<div id="toast"></div>
+<div id="modal" onclick="this.classList.remove('open')"><img id="modalImg" alt=""><div id="modalTitle"></div></div>
 
-    <script>
-        let autoRefreshInterval = null;
-        let isAuto = true;
-        let allGalleryImages = [];
-        let currentFilter = 'ALL';
-        let currentTab = 'env';
-        let galleryLimit = 60;
-        let lastGalleryFetchedAt = 0;
-        let isGalleryFetching = false;
-        let lastRgbTimestamp = null;
-        let lastIrTimestamp = null;
+<script>
+    const $ = id => document.getElementById(id);
+    let overview = null, health = null, autoTimer = null;
+    let galleryImages = [], galleryFilter = 'ALL', galleryLoadedAt = 0;
+    const MODES = {cool: '冷氣', dry: '除濕', fan: '送風', heat: '暖氣', auto: '自動'};
 
-        function showToast(msg, type = 'success') {
-            const toast = document.getElementById('toastNotice');
-            const toastMsg = document.getElementById('toastMsg');
-            toastMsg.textContent = msg;
-            toast.className = type === 'success' ? 'toast-success' : 'toast-error';
-            toast.style.display = 'flex';
-            setTimeout(hideToast, 6000);
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c])); }
+
+    function formatTime(ts) {
+        if (!ts) return '--';
+        let s = String(ts).trim();
+        if (!(s.endsWith('Z') || /[+-]\d{2}(:\d{2})?$/.test(s))) s = s.replace(' ', 'T') + 'Z';  // SQLite 時間是 UTC
+        const d = new Date(s.replace(' ', 'T'));
+        if (isNaN(d)) return ts;
+        return new Intl.DateTimeFormat('zh-TW', {timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false}).format(d);
+    }
+
+    function toast(msg, ok) {
+        const t = $('toast');
+        t.textContent = msg;
+        t.className = ok ? 'ok' : 'err';
+        t.style.display = 'block';
+        clearTimeout(t._timer);
+        t._timer = setTimeout(() => t.style.display = 'none', ok ? 4000 : 10000);
+    }
+
+    async function getJson(url, opts) {
+        const r = await fetch(url, opts);
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+        return j;
+    }
+
+    async function refresh() {
+        const errors = [];
+        await Promise.all([
+            getJson('/api/v1/overview').then(d => { overview = d; renderOverview(); }).catch(e => errors.push('資料: ' + e.message)),
+            getJson('/api/v1/system/health').then(h => { health = h; renderHealth(); }).catch(e => errors.push('系統狀態: ' + e.message)),
+        ]);
+        if ($('panel-gallery').classList.contains('active')) loadGallery();
+        if (overview && health) renderSystem();
+        $('lastUpdated').textContent = errors.length ? '更新失敗：' + errors.join('；') : '更新於 ' + new Date().toLocaleTimeString('zh-TW', {hour12: false});
+        $('lastUpdated').className = errors.length ? 'crit-text' : '';
+    }
+
+    function renderHealth() {
+        const alerts = health.alerts || [];
+        const contact = alerts.some(a => a.contact);
+        const crit = contact || alerts.some(a => a.level === 'critical');
+        $('health').className = 'card health' + (crit ? ' crit' : alerts.length ? ' warn' : '');
+        $('healthDot').className = 'dot' + (crit ? ' crit' : alerts.length ? ' warn' : '');
+        $('healthText').textContent = !alerts.length ? '系統正常'
+            : contact ? '有狀況需要聯繫我們' : `${alerts.length} 個項目需要注意（可依說明自行處理）`;
+        $('healthHint').textContent = contact ? `請截圖此區塊聯繫我們（裝置 ${overview ? overview.device_id : ''}）` : '';
+        $('alertList').style.display = alerts.length ? 'flex' : 'none';
+        $('alertList').innerHTML = alerts.map(a => `
+            <div class="alert">
+                <span class="tag ${a.contact ? 'contact' : 'self'}">${a.contact ? '需聯繫' : '可自行處理'}</span>
+                <span class="title">${esc(a.title)}</span>
+                <span class="detail">${esc(a.detail)}</span>
+                ${a.action ? `<span class="action">${esc(a.action)}</span>` : ''}
+            </div>`).join('');
+
+        const d = health.disk;
+        if (d) {
+            $('kDisk').innerHTML = `${(d.free_mb / 1024).toFixed(1)}<small>GB 可用</small>`;
+            $('kDiskBar').style.width = (d.used_pct || 0) + '%';
+            $('kDiskBar').style.background = d.free_mb < 2048 ? 'var(--crit)' : d.free_mb < 5120 ? 'var(--warn)' : 'var(--accent)';
+            $('kDiskSub').textContent = `共 ${(d.total_mb / 1024).toFixed(0)} GB · 照片保留 ${d.retention_days} 天`;
         }
-
-        function hideToast() {
-            document.getElementById('toastNotice').style.display = 'none';
+        const ac = health.ac || {};
+        if (!ac.enabled) { $('kAc').textContent = '未啟用'; $('kAcSub').textContent = 'AC_SERIAL_PORT=off'; }
+        else if (!ac.connected) { $('kAc').innerHTML = '<span class="crit-text">未連線</span>'; $('kAcSub').textContent = '檢查 ESP32 USB 線'; }
+        else {
+            const s = ac.state || {};
+            $('kAc').textContent = s.power ? `${MODES[s.mode] || s.mode} ${s.temp}°C` : '關機';
+            $('kAcSub').textContent = '開啟控制頁面 →';
         }
+    }
 
-        async function fetchData() {
-            try {
-                const res = await fetch('/api/v1/overview');
-                if (!res.ok) throw new Error('API 連線異常 (HTTP ' + res.status + ')');
-                const data = await res.json();
-                renderOverview(data);
+    function renderOverview() {
+        const o = overview, c = o.counts || {};
+        $('deviceId').textContent = o.device_id || '--';
+        $('serverUrl').textContent = o.server_url || '--';
 
-                if (currentTab === 'gallery') {
-                    await fetchGalleryData();
-                }
+        const e = (o.latest_env || [])[0];
+        $('kTemp').innerHTML = e && e.temperature != null ? `${Number(e.temperature).toFixed(1)}<small>°C</small>` : '--';
+        $('kHum').innerHTML = e && e.humidity != null ? `${Number(e.humidity).toFixed(1)}<small>%</small>` : '--';
+        $('kCo2').innerHTML = e && e.co2_ppm != null ? `${e.co2_ppm}<small>ppm</small>` : '--';
+        $('kEnvTime').textContent = e ? formatTime(e.timestamp) : '尚無資料';
+        const co2 = e ? e.co2_ppm : null;
+        $('kCo2Note').textContent = co2 == null ? '--' : co2 > 1200 ? '濃度過高，請立即通風' : co2 > 1000 ? '偏高，建議通風' : '良好';
+        $('kCo2Note').className = 'sub' + (co2 > 1200 ? ' crit-text' : co2 > 1000 ? ' warn-text' : '');
 
-                document.getElementById('lastUpdated').textContent = '最後更新: ' + new Date().toLocaleTimeString();
-            } catch (err) {
-                console.error(err);
-                document.getElementById('lastUpdated').textContent = '連線失敗: ' + err.message;
-            }
+        const q = c.total_unsynced || 0;
+        $('kQueue').innerHTML = `${q}<small>筆</small>`;
+        $('kQueue').className = 'value' + (q ? ' warn-text' : ' ok-text');
+        $('kQueueSub').textContent = q ? `環境 ${c.env_unsynced || 0} · 照片 ${(c.camera_rgb_unsynced || 0) + (c.camera_ir_unsynced || 0)}` : '全部已上傳';
+
+        renderCamera('rgb', (o.latest_rgb_images || [])[0]);
+        renderCamera('ir', (o.latest_ir_images || [])[0]);
+
+        const rows = o.latest_env || [];
+        $('envRows').innerHTML = rows.length ? rows.map(r => `
+            <tr><td>${r.id}</td><td>${formatTime(r.timestamp)}</td>
+            <td>${r.temperature != null ? Number(r.temperature).toFixed(2) : '-'}</td>
+            <td>${r.humidity != null ? Number(r.humidity).toFixed(2) : '-'}</td>
+            <td>${r.co2_ppm ?? '-'}</td>
+            <td><span class="pill ${r.is_synced ? 'synced' : 'pending'}">${r.is_synced ? '已上傳' : '待上傳'}</span></td></tr>`).join('')
+            : '<tr><td colspan="6" class="empty">尚無環境資料</td></tr>';
+    }
+
+    function renderCamera(type, img) {
+        const el = $(type + 'Img'), empty = $(type + 'Empty'), pill = $(type + 'Sync'), link = $(type + 'Link');
+        if (!img) {
+            el.style.display = 'none'; empty.style.display = 'block'; empty.textContent = '尚無照片';
+            pill.style.display = link.style.display = 'none';
+            $(type + 'Time').textContent = '--'; $(type + 'Size').textContent = '--';
+            return;
         }
-
-        async function fetchGalleryData(force = false) {
-            const now = Date.now();
-            if (!force && now - lastGalleryFetchedAt < 10000) return;
-            if (isGalleryFetching) return;
-            isGalleryFetching = true;
-            try {
-                const imgRes = await fetch(`/api/v1/images/list?limit=${galleryLimit}`);
-                if (imgRes.ok) {
-                    allGalleryImages = await imgRes.json();
-                    renderGallery(allGalleryImages, currentFilter);
-                    lastGalleryFetchedAt = Date.now();
-                }
-            } catch (err) {
-                console.warn('Failed to fetch gallery:', err);
-            } finally {
-                isGalleryFetching = false;
-            }
+        if (el.dataset.ts !== img.timestamp) {  // 新照片才重新載入，避免閃爍
+            el.dataset.ts = img.timestamp;
+            el.onload = () => { el.style.display = 'block'; empty.style.display = 'none'; };
+            el.onerror = () => { el.style.display = 'none'; empty.style.display = 'block';
+                                 empty.textContent = '照片讀取失敗：' + img.url + '（檔案不存在或已損毀）'; };
+            el.src = img.url + '?t=' + encodeURIComponent(img.timestamp);
+            el.onclick = () => openModal(img.url, (type === 'ir' ? '熱影像 ' : 'RGB ') + formatTime(img.timestamp));
         }
+        $(type + 'Time').textContent = formatTime(img.timestamp);
+        $(type + 'Size').textContent = (img.size_bytes / 1024).toFixed(1) + ' KB';
+        pill.style.display = 'inline-block';
+        pill.className = 'pill ' + (img.is_synced ? 'synced' : 'pending');
+        pill.textContent = img.is_synced ? '已上傳' : '待上傳';
+        link.href = img.url; link.style.display = 'inline';
+    }
 
-        function changeGalleryLimit(val) {
-            galleryLimit = parseInt(val, 10) || 60;
-            fetchGalleryData(true);
+    function renderSystem() {
+        const hw = overview.hardware || {}, d = health.disk || {}, ac = health.ac || {};
+        const purge = health.last_disk_purge;
+        const items = [
+            ['裝置 ID', overview.device_id], ['Server', overview.server_url],
+            ['取樣週期', `每 ${overview.sample_interval_minutes} 分鐘`],
+            ['SCD41 感測器', hw.scd41], ['RGB 相機', hw.camera_rgb], ['熱影像相機', hw.camera_ir],
+            ['冷氣遙控 (ESP32)', !ac.enabled ? '未啟用' : ac.connected ? `已連線 ${ac.port} · ${ac.protocol || '-'}` : `未連線：${ac.error || ''}`],
+            ['儲存空間', d.total_mb ? `${(d.free_mb / 1024).toFixed(1)} GB 可用 / ${(d.total_mb / 1024).toFixed(0)} GB（已用 ${d.used_pct}%）` : '--'],
+            ['照片保留', d.retention_days ? `已上傳的照片保留 ${d.retention_days} 天；可用空間低於 ${(d.emergency_purge_below_mb / 1024).toFixed(1)} GB 時自動刪最舊照片` : '--'],
+            ['最近一次緊急刪照片', purge ? `${formatTime(purge.time)}：刪除 ${purge.deleted_photos} 張（未上傳 ${purge.unsynced_deleted} 張）` : '從未發生'],
+            ['本機資料筆數', `環境 ${overview.counts.env_total} · RGB ${overview.counts.camera_rgb_total} · 熱影像 ${overview.counts.camera_ir_total}`],
+        ];
+        $('systemInfo').innerHTML = items.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v ?? '--')}</dd></div>`).join('');
+    }
+
+    async function loadGallery(force) {
+        if (!force && Date.now() - galleryLoadedAt < 10000) return;
+        galleryLoadedAt = Date.now();
+        try {
+            galleryImages = await getJson('/api/v1/images/list?limit=' + $('galleryLimit').value);
+            renderGallery();
+        } catch (e) {
+            $('gallery').innerHTML = `<div class="empty crit-text" style="grid-column:1/-1;">相片清單讀取失敗：${esc(e.message)}</div>`;
         }
+    }
 
-        function renderOverview(data) {
-            document.getElementById('badgeDeviceId').textContent = 'Device: ' + (data.device_id || 'rpi_edge');
-            document.getElementById('badgeServerUrl').textContent = 'Server: ' + (data.server_url || 'local');
-            document.getElementById('hwDeviceId').textContent = data.device_id || '--';
-            document.getElementById('hwServerUrl').textContent = data.server_url || '--';
-            document.getElementById('sampleIntervalText').textContent = data.sample_interval_minutes || 5;
+    function renderGallery() {
+        $('cAll').textContent = galleryImages.length;
+        $('cRgb').textContent = galleryImages.filter(i => i.type === 'RGB').length;
+        $('cIr').textContent = galleryImages.filter(i => i.type === 'IR').length;
+        const list = galleryFilter === 'ALL' ? galleryImages : galleryImages.filter(i => i.type === galleryFilter);
+        $('gallery').innerHTML = list.length ? list.map((img, i) => `
+            <div class="thumb"><img loading="lazy" src="${esc(img.url)}" data-i="${i}" alt="">
+            <div><span>${img.type === 'IR' ? '熱影像' : 'RGB'}</span><span>${formatTime(img.mtime)}</span></div></div>`).join('')
+            : '<div class="empty" style="grid-column:1/-1;">沒有照片</div>';
+        $('gallery').querySelectorAll('img').forEach(el => {
+            const img = list[+el.dataset.i];
+            el.onclick = () => openModal(img.url, `${img.type} ${formatTime(img.mtime)} · ${img.name}`);
+            el.onerror = () => { el.style.opacity = 0.25; el.title = '載入失敗'; };
+        });
+    }
 
-            const counts = data.counts || {};
-            document.getElementById('statTotal').textContent = (counts.total_records || 0) + ' 筆';
-            document.getElementById('statCamCount').textContent = `RGB: ${counts.camera_rgb_total || 0} | IR: ${counts.camera_ir_total || 0}`;
-            
-            const queueCount = counts.total_unsynced || 0;
-            document.getElementById('statQueue').textContent = queueCount + ' 筆';
-            if (queueCount === 0) {
-                document.getElementById('statQueue').style.color = 'var(--accent-emerald)';
-                document.getElementById('statQueueDetail').textContent = '✓ 本地資料全部已同步';
-            } else {
-                document.getElementById('statQueue').style.color = 'var(--accent-amber)';
-                document.getElementById('statQueueDetail').textContent = `⚠️ 待上傳: Env ${counts.env_unsynced||0} | HVAC ${counts.hvac_unsynced||0} | 照片 ${(counts.camera_rgb_unsynced||0)+(counts.camera_ir_unsynced||0)}`;
-            }
+    function openModal(src, title) {
+        $('modalImg').src = src;
+        $('modalTitle').textContent = title || '';
+        $('modal').classList.add('open');
+    }
 
-            // Latest Env (SCD41)
-            if (data.latest_env && data.latest_env.length > 0) {
-                const latest = data.latest_env[0];
-                document.getElementById('statTemp').textContent = (latest.temperature != null ? Number(latest.temperature).toFixed(1) : '--') + ' °C';
-                document.getElementById('statHum').textContent = (latest.humidity != null ? Number(latest.humidity).toFixed(1) : '--') + ' %';
-                document.getElementById('statCo2').textContent = (latest.co2_ppm != null ? latest.co2_ppm : '--') + ' ppm';
-                document.getElementById('statTempTime').textContent = formatTime(latest.timestamp);
-                document.getElementById('statHumTime').textContent = formatTime(latest.timestamp);
-
-                if (latest.co2_ppm > 1200) {
-                    document.getElementById('statCo2Status').textContent = '🚨 濃度嚴重偏高，請立即通風！';
-                    document.getElementById('statCo2Status').style.color = 'var(--accent-rose)';
-                } else if (latest.co2_ppm > 1000) {
-                    document.getElementById('statCo2Status').textContent = '⚠️ 濃度偏高，建議保持通風';
-                    document.getElementById('statCo2Status').style.color = 'var(--accent-amber)';
-                } else {
-                    document.getElementById('statCo2Status').textContent = '🌿 空氣品質優良';
-                    document.getElementById('statCo2Status').style.color = 'var(--accent-emerald)';
-                }
-            }
-
-            // Latest HVAC
-            if (data.latest_hvac && data.latest_hvac.length > 0) {
-                const latestHvac = data.latest_hvac[0];
-                const stateStr = latestHvac.hvac_state === 1 ? '🟢 運轉中 (ON)' : (latestHvac.hvac_state === 0 ? '⚪ 關閉 (OFF)' : '⚠️ 離線 / 未配置');
-                document.getElementById('statHvac').textContent = stateStr;
-                document.getElementById('statHvacPower').textContent = (latestHvac.power_w != null ? Number(latestHvac.power_w).toFixed(1) : '0.0') + ' W';
-                document.getElementById('hwHvacStatus').textContent = latestHvac.hvac_state >= 0 ? 'Connected (State: ' + stateStr + ')' : 'Offline / Standalone';
-            } else {
-                document.getElementById('statHvac').textContent = '⚪ 未連線';
-                document.getElementById('hwHvacStatus').textContent = 'Modbus 未連線';
-            }
-
-            // Latest RGB Camera Image (Cached to prevent reload flicker)
-            const rgbImg = document.getElementById('rgbImg');
-            const rgbPh = document.getElementById('rgbPlaceholder');
-            const rgbErr = document.getElementById('rgbErrorCard');
-            const rgbLink = document.getElementById('rgbLink');
-            const rgbSyncTag = document.getElementById('rgbSyncTag');
-
-            if (data.latest_rgb_images && data.latest_rgb_images.length > 0) {
-                const rgb = data.latest_rgb_images[0];
-                rgbErr.style.display = 'none';
-                rgbPh.style.display = 'none';
-                rgbImg.style.display = 'block';
-                if (lastRgbTimestamp !== rgb.timestamp || rgbImg.getAttribute('data-loaded-src') !== rgb.url) {
-                    rgbImg.src = rgb.url + '?t=' + encodeURIComponent(rgb.timestamp);
-                    rgbImg.setAttribute('data-loaded-src', rgb.url);
-                    lastRgbTimestamp = rgb.timestamp;
-                }
-                rgbLink.href = rgb.url;
-                rgbLink.style.display = 'inline';
-                document.getElementById('rgbTime').textContent = formatTime(rgb.timestamp);
-                document.getElementById('rgbSize').textContent = `大小: ${(rgb.size_bytes / 1024).toFixed(1)} KB`;
-                
-                rgbSyncTag.style.display = 'inline-block';
-                rgbSyncTag.className = rgb.is_synced ? 'sync-tag synced' : 'sync-tag pending';
-                rgbSyncTag.textContent = rgb.is_synced ? '✓ 已同步' : '⏳ 待上傳';
-            } else {
-                rgbImg.style.display = 'none';
-                rgbErr.style.display = 'none';
-                rgbPh.style.display = 'flex';
-                rgbLink.style.display = 'none';
-                rgbSyncTag.style.display = 'none';
-                document.getElementById('rgbTime').textContent = '--';
-                document.getElementById('rgbSize').textContent = '大小: --';
-            }
-
-            // Latest IR Camera Image (Cached to prevent reload flicker)
-            const irImg = document.getElementById('irImg');
-            const irPh = document.getElementById('irPlaceholder');
-            const irErr = document.getElementById('irErrorCard');
-            const irLink = document.getElementById('irLink');
-            const irSyncTag = document.getElementById('irSyncTag');
-
-            if (data.latest_ir_images && data.latest_ir_images.length > 0) {
-                const ir = data.latest_ir_images[0];
-                irErr.style.display = 'none';
-                irPh.style.display = 'none';
-                irImg.style.display = 'block';
-                if (lastIrTimestamp !== ir.timestamp || irImg.getAttribute('data-loaded-src') !== ir.url) {
-                    irImg.src = ir.url + '?t=' + encodeURIComponent(ir.timestamp);
-                    irImg.setAttribute('data-loaded-src', ir.url);
-                    lastIrTimestamp = ir.timestamp;
-                }
-                irLink.href = ir.url;
-                irLink.style.display = 'inline';
-                document.getElementById('irTime').textContent = formatTime(ir.timestamp);
-                document.getElementById('irSize').textContent = `大小: ${(ir.size_bytes / 1024).toFixed(1)} KB`;
-
-                irSyncTag.style.display = 'inline-block';
-                irSyncTag.className = ir.is_synced ? 'sync-tag synced' : 'sync-tag pending';
-            } else {
-                irImg.style.display = 'none';
-                irErr.style.display = 'none';
-                irPh.style.display = 'flex';
-                irLink.style.display = 'none';
-                irSyncTag.style.display = 'none';
-                document.getElementById('irTime').textContent = '--';
-                document.getElementById('irSize').textContent = '大小: --';
-            }
-
-            // Render SCD41 Table
-            const envTbody = document.getElementById('envTableBody');
-            if (data.latest_env && data.latest_env.length > 0) {
-                envTbody.innerHTML = data.latest_env.map(e => `
-                    <tr>
-                        <td><strong>#${e.id}</strong></td>
-                        <td>${formatTime(e.timestamp)}</td>
-                        <td><strong style="color:var(--accent-amber);">${e.temperature != null ? Number(e.temperature).toFixed(2) : '-'}</strong></td>
-                        <td><strong style="color:var(--accent-cyan);">${e.humidity != null ? Number(e.humidity).toFixed(2) : '-'}</strong></td>
-                        <td><strong style="color:var(--accent-emerald);">${e.co2_ppm != null ? e.co2_ppm : '-'}</strong></td>
-                        <td><span class="sync-tag ${e.is_synced ? 'synced' : 'pending'}">${e.is_synced ? '✓ 已同步' : '⏳ 待上傳'}</span></td>
-                    </tr>
-                `).join('');
-            } else {
-                envTbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-dim); padding:24px;">目前本地 SQLite 尚無環境感測數據</td></tr>';
-            }
-
-            // Render HVAC Table
-            const hvacTbody = document.getElementById('hvacTableBody');
-            if (data.latest_hvac && data.latest_hvac.length > 0) {
-                hvacTbody.innerHTML = data.latest_hvac.map(h => `
-                    <tr>
-                        <td><strong>#${h.id}</strong></td>
-                        <td>${formatTime(h.timestamp)}</td>
-                        <td>${h.hvac_state === 1 ? '🟢 運轉中' : (h.hvac_state === 0 ? '⚪ 關閉' : '⚠️ 離線')}</td>
-                        <td><strong>${h.power_w != null ? Number(h.power_w).toFixed(1) + ' W' : '-'}</strong></td>
-                        <td><span class="sync-tag ${h.is_synced ? 'synced' : 'pending'}">${h.is_synced ? '✓ 已同步' : '⏳ 待上傳'}</span></td>
-                    </tr>
-                `).join('');
-            } else {
-                hvacTbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color: var(--text-dim); padding:24px;">目前本地 SQLite 尚無 HVAC 記錄</td></tr>';
-            }
+    async function runAction(kind, btn) {
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span>${kind === 'capture' ? '拍照中…' : '同步中…'}`;
+        try {
+            const j = await getJson('/api/v1/actions/' + kind, {method: 'POST'});
+            toast(j.message || '完成', true);
+            await refresh();
+            if ($('panel-gallery').classList.contains('active')) loadGallery(true);
+        } catch (e) {
+            toast((kind === 'capture' ? '拍照失敗：' : '同步失敗：') + e.message, false);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = label;
         }
+    }
 
-        function handleImageError(type) {
-            const img = document.getElementById(type + 'Img');
-            const errBox = document.getElementById(type + 'ErrorCard');
-            const errDetail = document.getElementById(type + 'ErrorDetail');
-            const ph = document.getElementById(type + 'Placeholder');
-            if (img) img.style.display = 'none';
-            if (ph) ph.style.display = 'none';
-            if (errBox) {
-                errBox.style.display = 'flex';
-                const cleanSrc = img ? img.src.split('?')[0] : '';
-                errDetail.textContent = `路徑: ${cleanSrc} (請檢查相機排線連接或硬體模組狀態)`;
-            }
-        }
+    function toggleAuto() {
+        const b = $('btnAuto');
+        if (autoTimer) { clearInterval(autoTimer); autoTimer = null; b.textContent = '自動更新 關閉'; b.classList.remove('on'); }
+        else { autoTimer = setInterval(refresh, 15000); b.textContent = '自動更新 15s'; b.classList.add('on'); }
+    }
 
-        function renderGallery(images, filter = 'ALL') {
-            const container = document.getElementById('galleryContainer');
-            if (!images || images.length === 0) {
-                container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-dim); padding: 30px;">本地目錄尚無拍攝照片</div>';
-                return;
-            }
+    document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+        document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + t.dataset.tab));
+        if (t.dataset.tab === 'gallery') loadGallery(true);
+    });
+    document.querySelectorAll('#galleryFilter button').forEach(b => b.onclick = () => {
+        galleryFilter = b.dataset.f;
+        document.querySelectorAll('#galleryFilter button').forEach(x => x.classList.toggle('active', x === b));
+        renderGallery();
+    });
+    $('galleryLimit').onchange = () => loadGallery(true);
 
-            const rgbCount = images.filter(i => i.type === 'RGB').length;
-            const irCount = images.filter(i => i.type === 'IR').length;
-            document.getElementById('countAllImgs').textContent = images.length;
-            document.getElementById('countRgbImgs').textContent = rgbCount;
-            document.getElementById('countIrImgs').textContent = irCount;
-
-            const filtered = filter === 'ALL' ? images : images.filter(i => i.type === filter);
-            if (filtered.length === 0) {
-                container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-dim); padding: 30px;">無符合篩選條件的相片</div>';
-                return;
-            }
-
-            container.innerHTML = filtered.map(img => `
-                <div class="gallery-item">
-                    <img src="${img.url}" alt="${img.name}" loading="lazy" onerror="this.onerror=null; this.style.opacity=0.3; this.title='載入失敗';" onclick="openModal('${img.url}', '${img.type === 'IR' ? '🔴 FLIR Lepton IR 熱影像' : '🟢 RGB 可見光相機'} (${img.name})')">
-                    <div class="gallery-meta">
-                        <span style="font-weight:700; color:${img.type === 'IR' ? 'var(--accent-rose)' : 'var(--accent-emerald)'};">${img.type === 'IR' ? '🔴 IR' : '🟢 RGB'}</span>
-                        <span style="font-size:0.7rem; color:var(--text-dim);">${formatTime(img.mtime)}</span>
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        function filterGallery(type, btn) {
-            currentFilter = type;
-            document.querySelectorAll('.gallery-filter button').forEach(b => b.classList.remove('active'));
-            if (btn) btn.classList.add('active');
-            renderGallery(allGalleryImages, currentFilter);
-        }
-
-        async function triggerInstantCapture() {
-            const btn = document.getElementById('btnSnap');
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner"></span> 拍攝與同步中...';
-            try {
-                const res = await fetch('/api/v1/actions/capture', { method: 'POST' });
-                const json = await res.json();
-                if (!res.ok) throw new Error(json.detail || '拍攝失敗');
-                showToast(json.message || '立即拍照與同步完成！', 'success');
-                await fetchData();
-                await fetchGalleryData(true);
-            } catch (err) {
-                console.error(err);
-                showToast('拍照失敗: ' + err.message, 'error');
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-            }
-        }
-
-        async function triggerInstantSync() {
-            const btn = document.getElementById('btnSync');
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner"></span> 上傳同步中...';
-            try {
-                const res = await fetch('/api/v1/actions/sync', { method: 'POST' });
-                const json = await res.json();
-                if (!res.ok) throw new Error(json.detail || '同步失敗');
-                showToast(json.message || '同步完成！', 'success');
-                await fetchData();
-                await fetchGalleryData(true);
-            } catch (err) {
-                console.error(err);
-                showToast('同步失敗: ' + err.message, 'error');
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-            }
-        }
-
-        function formatTime(isoStr) {
-            if (!isoStr) return '--';
-            let s = String(isoStr).trim();
-            const hasTimezone = s.endsWith('Z') || /[+-]\d{2}(:\d{2})?$/.test(s);
-            if (!hasTimezone) {
-                // SQLite CURRENT_TIMESTAMP is in UTC, ensure 'Z' is appended for proper UTC interpretation
-                s = s.replace(' ', 'T') + 'Z';
-            } else if (s.includes(' ') && !s.includes('T')) {
-                s = s.replace(' ', 'T');
-            }
-            const d = new Date(s);
-            if (isNaN(d.getTime())) return isoStr;
-            
-            // 強制轉換為 GMT+8 (Asia/Taipei)
-            const options = {
-                timeZone: 'Asia/Taipei',
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false
-            };
-            return new Intl.DateTimeFormat('zh-TW', options).format(d) + ' (GMT+8)';
-        }
-
-        function switchTab(tab, btn) {
-            currentTab = tab;
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            if (btn) btn.classList.add('active');
-            document.getElementById('tabEnv').style.display = tab === 'env' ? 'block' : 'none';
-            document.getElementById('tabHvac').style.display = tab === 'hvac' ? 'block' : 'none';
-            document.getElementById('tabGallery').style.display = tab === 'gallery' ? 'block' : 'none';
-            document.getElementById('tabHardware').style.display = tab === 'hardware' ? 'block' : 'none';
-            if (tab === 'gallery') {
-                fetchGalleryData(true);
-            }
-        }
-
-        function openModal(src, title) {
-            if (!src) return;
-            document.getElementById('modalImg').src = src;
-            document.getElementById('modalTitle').textContent = title || '';
-            document.getElementById('imgModal').classList.add('open');
-        }
-
-        function closeModal() {
-            document.getElementById('imgModal').classList.remove('open');
-        }
-
-        function toggleAutoRefresh() {
-            isAuto = !isAuto;
-            const btn = document.getElementById('btnToggleAuto');
-            if (isAuto) {
-                btn.textContent = '自動更新: 15s';
-                btn.classList.add('active');
-                autoRefreshInterval = setInterval(fetchData, 15000);
-            } else {
-                btn.textContent = '自動更新: 關閉';
-                btn.classList.remove('active');
-                clearInterval(autoRefreshInterval);
-            }
-        }
-
-        // Init
-        fetchData();
-        autoRefreshInterval = setInterval(fetchData, 15000);
-    </script>
+    refresh();
+    autoTimer = setInterval(refresh, 15000);
+</script>
 </body>
 </html>
 """

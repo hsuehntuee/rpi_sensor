@@ -40,12 +40,8 @@ def mock_settings(tmp_path: Path) -> Settings:
         lepton_height=120,
         lepton_colormap="rainbow",
         lepton_reset_gpio=None,
-        modbus_port="/dev/ttyUSB0",
-        modbus_baudrate=9600,
-        modbus_slave_id=1,
-        modbus_state_register=100,
-        modbus_control_register=101,
-        modbus_power_register=102,
+        ac_protocol="HITACHI_AC344",
+        ac_name="304D",
         edge_web_enabled=True,
         edge_web_host="0.0.0.0",
         edge_web_port=8080,
@@ -68,13 +64,12 @@ def test_edge_dashboard_html_pages(mock_settings, database):
     for path in ["/", "/dashboard", "/view"]:
         res = client.get(path)
         assert res.status_code == 200
-        assert "樹莓派 5 邊緣節點即時儀表板" in res.text
+        assert "邊緣節點監控" in res.text
         assert "SCD41" in res.text
 
 
 def test_edge_overview_api(mock_settings, database):
     database.insert_env("test_edge_node", 24.8, 58.2, 620)
-    database.insert_hvac("test_edge_node", 1, 1500.0)
     database.insert_camera("test_edge_node", "RGB", str(mock_settings.image_dir / "rgb.jpg"))
     database.insert_camera("test_edge_node", "IR", str(mock_settings.image_dir / "ir.jpg"))
 
@@ -85,11 +80,9 @@ def test_edge_overview_api(mock_settings, database):
     data = res.json()
 
     assert data["device_id"] == "test_edge_node"
-    assert data["counts"]["total_records"] == 4
+    assert data["counts"]["total_records"] == 3
     assert len(data["latest_env"]) == 1
     assert data["latest_env"][0]["temperature"] == 24.8
-    assert len(data["latest_hvac"]) == 1
-    assert data["latest_hvac"][0]["power_w"] == 1500.0
     assert len(data["latest_rgb_images"]) == 1
     assert len(data["latest_ir_images"]) == 1
 
@@ -137,3 +130,31 @@ def test_edge_actions(mock_settings, database):
     assert res_sync.status_code == 200
     assert res_sync.json()["status"] == "success"
     assert res_sync.json()["synced_count"] == 3
+
+
+def test_ac_page_and_status_without_remote(mock_settings, database):
+    client = TestClient(create_edge_app(mock_settings, database))
+    assert "冷氣" in client.get("/ac").text
+    data = client.get("/api/v1/ac").json()
+    assert data["connected"] is False
+    assert data["name"] == "304D"
+    assert client.post("/api/v1/ac", json={"power": True}).status_code == 503
+
+
+def test_ac_set_and_status(mock_settings, database):
+    database.insert_env("test_edge_node", 27.5, 60.0, 600)
+    remote = Mock()
+    remote.status.return_value = {
+        "connected": True, "port": "/dev/ttyUSB0", "protocol": "HITACHI_AC344",
+        "state": {"power": True, "mode": "cool", "temp": 25, "fan": "auto", "swing": False},
+    }
+    client = TestClient(create_edge_app(mock_settings, database, ac_remote=remote))
+
+    res = client.post("/api/v1/ac", json={"power": True, "mode": "cool", "temp": 25})
+    assert res.status_code == 200
+    remote.set_state.assert_called_once_with(power=True, mode="cool", temp=25.0, fan="auto", swing=False)
+    assert res.json()["state"]["temp"] == 25
+    assert res.json()["room"]["temperature"] == 27.5
+
+    remote.set_state.side_effect = RuntimeError("ESP32 沒有回應")
+    assert client.post("/api/v1/ac", json={"power": False}).status_code == 502

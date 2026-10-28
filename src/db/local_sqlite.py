@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
@@ -306,6 +308,8 @@ class LocalDatabase:
         )
 
         deleted_count = 0
+        unsynced_deleted = 0
+        free_mb_before = free_mb
         with self.connect() as connection:
             # Order: synced photos first (is_synced DESC), then oldest id (id ASC)
             while free_mb < target_free_mb:
@@ -318,6 +322,8 @@ class LocalDatabase:
                 ids_to_delete = []
                 for row in candidates:
                     ids_to_delete.append(row["id"])
+                    if not row["is_synced"]:
+                        unsynced_deleted += 1
                     try:
                         p = Path(row["file_path"])
                         if p.is_file():
@@ -339,9 +345,46 @@ class LocalDatabase:
                 except Exception:
                     break
 
-        if deleted_count > 0:
-            LOGGER.info(
-                "[Disk Safety Guard] Purged %d oldest photos. Free disk space restored to %d MB.",
-                deleted_count, free_mb,
+        if deleted_count > 0 or unsynced_deleted > 0:
+            LOGGER.warning(
+                "[Disk Safety Guard] Purged %d oldest photos (%d not yet synced). Free disk space restored to %d MB.",
+                deleted_count, unsynced_deleted, free_mb,
             )
+            self._record_disk_purge({
+                "time": datetime.now(timezone.utc).isoformat(),
+                "deleted_photos": deleted_count,
+                "unsynced_deleted": unsynced_deleted,
+                "free_mb_before": free_mb_before,
+                "free_mb_after": free_mb,
+            })
         return deleted_count
+
+    # --- 給儀表板示警用 ------------------------------------------------------
+    def _purge_record_path(self) -> Path | None:
+        return None if self.path == ":memory:" else Path(self.path).parent / "disk_guard_last.json"
+
+    def _record_disk_purge(self, record: dict[str, Any]) -> None:
+        """記下最近一次緊急刪照片，儀表板會顯示示警（重開機後仍保留）"""
+        self._last_disk_purge = record
+        path = self._purge_record_path()
+        if path is not None:
+            path.write_text(json.dumps(record), encoding="utf-8")
+
+    def get_last_disk_purge(self) -> dict[str, Any] | None:
+        path = self._purge_record_path()
+        if path is not None and path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return getattr(self, "_last_disk_purge", None)
+
+    def get_activity(self) -> dict[str, Any]:
+        """最新一筆取樣/拍照時間（timestamp 為 SQLite UTC 字串），給儀表板判斷硬體是否停擺"""
+        def one(connection: sqlite3.Connection, sql: str) -> Any:
+            row = connection.execute(sql).fetchone()
+            return row[0] if row else None
+
+        with self.connect() as connection:
+            return {
+                "last_env": one(connection, "SELECT timestamp FROM env_metrics ORDER BY id DESC LIMIT 1"),
+                "last_rgb": one(connection, "SELECT timestamp FROM camera_logs WHERE image_type = 'RGB' ORDER BY id DESC LIMIT 1"),
+                "last_ir": one(connection, "SELECT timestamp FROM camera_logs WHERE image_type = 'IR' ORDER BY id DESC LIMIT 1"),
+            }

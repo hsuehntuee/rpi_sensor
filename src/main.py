@@ -21,12 +21,25 @@ class Readable(Protocol):
     def read(self) -> dict[str, Any]: ...
 
 
-class StatusReadable(Protocol):
-    def read_status(self) -> dict[str, Any]: ...
-
-
 class Camera(Protocol):
     def capture(self) -> Path: ...
+
+
+class FailureLatch:
+    """同一個硬體持續故障時只在第一次寫 log，恢復後再壞才會再寫（避免每 5 分鐘洗版佔 SD 卡）"""
+
+    def __init__(self) -> None:
+        self._failing: set[str] = set()
+
+    def failed(self, key: str, message: str) -> None:
+        if key not in self._failing:
+            self._failing.add(key)
+            LOGGER.exception("%s (further identical failures are not logged until it recovers)", message)
+
+    def ok(self, key: str) -> None:
+        if key in self._failing:
+            self._failing.discard(key)
+            LOGGER.warning("%s recovered", key)
 
 
 def guarded(name: str, task: Callable[[], None]) -> Callable[[], None]:
@@ -43,7 +56,6 @@ def build_sensor_task(
     device_id: str,
     climate_sensor: Readable,
     co2_sensor: Readable,
-    hvac: StatusReadable,
 ) -> Callable[[], None]:
     def collect() -> None:
         temperature: float | None = None
@@ -67,20 +79,6 @@ def build_sensor_task(
                 humidity=humidity,
                 co2_ppm=co2_ppm,
             )
-        try:
-            status = hvac.read_status()
-            database.insert_hvac(
-                device_id=device_id,
-                hvac_state=int(status["hvac_state"]),
-                power_w=(
-                    None
-                    if status.get("power_w") is None
-                    else float(status["power_w"])
-                ),
-            )
-        except Exception:
-            database.insert_hvac(device_id, hvac_state=-1, power_w=None)
-            LOGGER.exception("HVAC status read failed")
 
     return collect
 
@@ -115,6 +113,8 @@ def build_camera_task(
     min_disk_free_mb: int = 1500,
     image_dir: Path | None = None,
 ) -> Callable[[], None]:
+    latch = FailureLatch()
+
     def capture() -> None:
         if not _CAMERA_TASK_LOCK.acquire(blocking=False):
             LOGGER.warning("Camera capture already in progress. Skipping duplicate run.")
@@ -127,24 +127,23 @@ def build_camera_task(
                     path = camera.capture()
                     database.insert_camera(device_id, image_type, str(path))
                     LOGGER.info("[%s Camera] Saved image to: %s", image_type, path)
+                    latch.ok(f"{image_type} camera")
                 except Exception:
-                    LOGGER.exception("%s camera capture failed", image_type)
+                    latch.failed(f"{image_type} camera", f"{image_type} camera capture failed")
         finally:
             _CAMERA_TASK_LOCK.release()
 
     return capture
 
 
-def build_scd41_hvac_task(
+def build_scd41_logging_task(
     database: LocalDatabase,
     device_id: str,
     scd41: Readable,
-    hvac: StatusReadable | None,
 ) -> Callable[[], None]:
-    _hvac_err_count = 0
+    latch = FailureLatch()
 
     def collect() -> None:
-        nonlocal _hvac_err_count
         try:
             reading = scd41.read()
             if reading is not None:
@@ -158,31 +157,9 @@ def build_scd41_hvac_task(
                     co2_ppm=co2,
                 )
                 LOGGER.info("[SCD41 Sensor] Reading: Temp=%.1f°C, Humidity=%.1f%%, CO2=%d ppm", temp, hum, co2)
+                latch.ok("SCD41")
         except Exception:
-            LOGGER.exception("SCD41 read failed")
-
-        if hvac is not None:
-            try:
-                status = hvac.read_status()
-                database.insert_hvac(
-                    device_id=device_id,
-                    hvac_state=int(status["hvac_state"]),
-                    power_w=(
-                        None
-                        if status.get("power_w") is None
-                        else float(status["power_w"])
-                    ),
-                )
-                if _hvac_err_count > 0:
-                    LOGGER.info("HVAC Modbus communication restored after %d failures", _hvac_err_count)
-                    _hvac_err_count = 0
-            except Exception as exc:
-                _hvac_err_count += 1
-                database.insert_hvac(device_id, hvac_state=-1, power_w=None)
-                if _hvac_err_count == 1:
-                    LOGGER.warning("HVAC status read failed: %s (will retry silently)", exc)
-                elif _hvac_err_count % 288 == 0:  # once every 24 hours
-                    LOGGER.warning("HVAC status still unreachable after %d attempts: %s", _hvac_err_count, exc)
+            latch.failed("SCD41", "SCD41 read failed")
 
     return collect
 
@@ -342,33 +319,17 @@ def main() -> None:
     if ir_camera is None:
         ir_camera = DummyCamera("IR")
 
-    # 4. Initialize HVAC Modbus Control
-    hvac_control = None
-    if (
-        settings.modbus_slave_id is not None
-        and settings.modbus_state_register is not None
-        and settings.modbus_control_register is not None
-    ):
+    # 4. IR air-conditioner remote (ESP32 on USB serial). The port is opened lazily
+    # on first use, so a missing ESP32 never blocks sensing/camera/sync.
+    ac_remote = None
+    if settings.ac_serial_port.lower() not in {"", "off", "none", "false"}:
         try:
-            from pymodbus.client import ModbusSerialClient
-            from src.control.hvac_modbus import HVACModbus
-
-            modbus_client = ModbusSerialClient(
-                port=settings.modbus_port,
-                baudrate=settings.modbus_baudrate,
-            )
-            hvac_control = HVACModbus(
-                client=modbus_client,
-                slave_id=settings.modbus_slave_id,
-                state_register=settings.modbus_state_register,
-                control_register=settings.modbus_control_register,
-                power_register=settings.modbus_power_register,
-            )
-            LOGGER.info("Successfully initialized HVAC Modbus client on port %s", settings.modbus_port)
+            from src.control.ir_ac import IrAcRemote
+            ac_remote = IrAcRemote(settings.ac_serial_port, settings.ac_protocol)
+            LOGGER.info("IR AC remote enabled (port=%s, protocol=%s)",
+                        settings.ac_serial_port, settings.ac_protocol or "firmware default")
         except Exception as exc:
-            LOGGER.warning("Could not initialize Modbus HVAC control: %s", exc)
-    else:
-        LOGGER.info("Modbus HVAC settings are not fully configured. HVAC tracking is disabled.")
+            LOGGER.warning("Could not set up IR AC remote: %s", exc)
 
     class DummySCD41:
         def read(self) -> dict[str, float | int] | None:
@@ -378,11 +339,10 @@ def main() -> None:
         scd41_sensor = DummySCD41()
 
     # Build scheduled tasks
-    sensor_task = build_scd41_hvac_task(
+    sensor_task = build_scd41_logging_task(
         database=database,
         device_id=settings.device_id,
         scd41=scd41_sensor,
-        hvac=hvac_control,
     )
 
     camera_task = build_camera_task(
@@ -409,10 +369,10 @@ def main() -> None:
                 pass  # server reachable but nothing to sync — silent
         except Exception as exc:
             _sync_fail_count += 1
-            if _sync_fail_count == 1:
-                LOGGER.warning("RemoteSync: server unreachable (%s), entering offline buffering mode (will retry silently)", exc)
+            if _sync_fail_count == 1:  # 資料暫存本機，不算緊急；快滿時由磁碟示警處理
+                LOGGER.info("RemoteSync: server unreachable (%s), entering offline buffering mode (will retry silently)", exc)
             elif _sync_fail_count % 1440 == 0:  # once every 12 hours (1440 * 30s)
-                LOGGER.warning(
+                LOGGER.info(
                     "RemoteSync: still offline after %d attempts (%.1f days offline). Data safely buffered locally.",
                     _sync_fail_count, (_sync_fail_count * 30) / 86400,
                 )
@@ -451,7 +411,7 @@ def main() -> None:
                 "scd41": "Hardware Active" if not isinstance(scd41_sensor, DummySCD41) else "Standalone / Emulated",
                 "camera_rgb": "PiCamera Active" if not isinstance(rgb_camera, DummyCamera) else "Standalone / Emulated",
                 "camera_ir": "FLIR Lepton Active" if not isinstance(ir_camera, DummyCamera) else "Standalone / Emulated",
-                "hvac_modbus": "Modbus Connected" if hvac_control is not None else "Disabled",
+                "ac_remote": f"ESP32 IR ({settings.ac_serial_port})" if ac_remote is not None else "Disabled",
             }
 
             web_app = create_edge_app(
@@ -460,6 +420,7 @@ def main() -> None:
                 capture_callback=_manual_capture_callback,
                 sync_callback=_manual_sync_callback,
                 hardware_status=hardware_info,
+                ac_remote=ac_remote,
             )
 
             config = uvicorn.Config(

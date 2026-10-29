@@ -136,6 +136,34 @@ void syncHitachiAc1Power(const decode_results &r, stdAc::state_t &heard) {
 }
 
 // ---------------------------------------------------------------------------
+// ELECTRA_AC（614 東元）
+// 實測原廠遙控器：byte 11 是「這次按了哪顆鍵」：溫度+ 0x40、溫度- 0x41、左右擺風 0x43、
+// 風速 0x44、電源 0x45、模式 0x46。函式庫固定送 0x08（遙控器從不送），這裡改成依變化填鍵碼。
+
+uint8_t electraKeyCode(const stdAc::state_t &next, const stdAc::state_t *prev) {
+  if (!prev || prev->power != next.power) return 0x45;
+  if (prev->mode != next.mode) return 0x46;
+  if (prev->fanspeed != next.fanspeed) return 0x44;
+  if (prev->swingh != next.swingh) return 0x43;
+  if (next.degrees < prev->degrees) return 0x41;
+  return 0x40;  // 溫度+（上下擺風單獨改變時也用這個；沒有實測到上下擺風的鍵碼）
+}
+
+bool sendElectra(const stdAc::state_t &next, const stdAc::state_t *prev) {
+  IRElectraAc ac(IR_LED_PIN);
+  ac.begin();
+  ac.setPower(next.power);
+  ac.setMode(ac.convertMode(next.mode));
+  ac.setTemp(next.degrees);
+  ac.setFan(ac.convertFan(next.fanspeed));
+  ac.setSwingV(next.swingv != stdAc::swingv_t::kOff);
+  ac.setSwingH(next.swingh != stdAc::swingh_t::kOff);
+  ac.getRaw()[11] = electraKeyCode(next, prev);
+  ac.send();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // 指令處理
 
 // 迴路測試：送出時接收器不關（"loopback":true），送完把自己收到的訊號解碼回報。
@@ -183,8 +211,10 @@ void handleCommand(JsonVariantConst in, JsonDocument &out) {
     bool sameProto = haveAcState && acState.protocol == next.protocol;
     if (loopback) irrecv.resume(); else irrecv.disableIRIn();
     const stdAc::state_t *prev = sameProto ? &acState : nullptr;
-    bool ok = next.protocol == decode_type_t::HITACHI_AC1 ? sendHitachiAc1(next, prev)
-                                                          : irac.sendAc(next, prev);
+    bool ok;
+    if (next.protocol == decode_type_t::HITACHI_AC1) ok = sendHitachiAc1(next, prev);
+    else if (next.protocol == decode_type_t::ELECTRA_AC) ok = sendElectra(next, prev);
+    else ok = irac.sendAc(next, prev);
     if (loopback) reportLoopback(out); else irrecv.enableIRIn();
     if (!ok) {
       out["ok"] = false;

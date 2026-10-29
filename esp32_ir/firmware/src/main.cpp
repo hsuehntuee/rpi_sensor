@@ -100,6 +100,42 @@ void loadAcState() {
 }
 
 // ---------------------------------------------------------------------------
+// HITACHI_AC1（304D 日立，R-LT0541-HTA-B 遙控器）
+// 實測原廠遙控器：Power 位元永遠是 0，開關機只靠 PowerToggle（按一次就切換），沒有擺風；
+// 除濕送溫度 16°C＋弱風，送風溫度欄位為 0。函式庫的 IRac 會把 Power 設成 1，
+// 所以這裡照遙控器的格式自己組。
+
+bool sendHitachiAc1(const stdAc::state_t &next, const stdAc::state_t *prev) {
+  IRHitachiAc1 ac(IR_LED_PIN);
+  ac.begin();
+  ac.setModel(next.model >= 0 ? (hitachi_ac1_remote_model_t)next.model
+                              : hitachi_ac1_remote_model_t::R_LT0541_HTA_B);
+  // 函式庫在送風模式下不會套用非自動的風速，所以先在冷氣模式設好風速再切模式
+  ac.setMode(kHitachiAc1Cool);
+  ac.setFan(ac.convertFan(next.fanspeed));
+  ac.setMode(ac.convertMode(next.mode));
+  ac.setTemp(next.mode == stdAc::opmode_t::kDry ? 16 : next.degrees);
+  ac.setSwingV(false);
+  ac.setSwingH(false);
+  ac.setSwingToggle(false);
+  ac.setPower(false);
+  // 不知道冷氣目前狀態時（第一次送），假設這次是要切換電源
+  const bool prevPower = prev ? prev->power : !next.power;
+  ac.setPowerToggle(next.power != prevPower);
+  if (next.mode == stdAc::opmode_t::kFan) ac.getRaw()[6] = 0;  // 送風：遙控器這個 byte 送 0
+  ac.send();
+  return true;
+}
+
+// 原廠遙控器按了電源鍵（PowerToggle）→ 翻轉我們記錄的開關狀態；Power 位元本身不可信
+void syncHitachiAc1Power(const decode_results &r, stdAc::state_t &heard) {
+  IRHitachiAc1 ac(IR_LED_PIN);
+  ac.setRaw(r.state);
+  const bool before = haveAcState ? acState.power : false;
+  heard.power = ac.getPowerToggle() ? !before : before;
+}
+
+// ---------------------------------------------------------------------------
 // 指令處理
 
 // 迴路測試：送出時接收器不關（"loopback":true），送完把自己收到的訊號解碼回報。
@@ -146,7 +182,9 @@ void handleCommand(JsonVariantConst in, JsonDocument &out) {
     }
     bool sameProto = haveAcState && acState.protocol == next.protocol;
     if (loopback) irrecv.resume(); else irrecv.disableIRIn();
-    bool ok = irac.sendAc(next, sameProto ? &acState : nullptr);
+    const stdAc::state_t *prev = sameProto ? &acState : nullptr;
+    bool ok = next.protocol == decode_type_t::HITACHI_AC1 ? sendHitachiAc1(next, prev)
+                                                          : irac.sendAc(next, prev);
     if (loopback) reportLoopback(out); else irrecv.enableIRIn();
     if (!ok) {
       out["ok"] = false;
@@ -291,6 +329,7 @@ void handleIrReceive() {
   // 聽到原廠遙控器的冷氣指令 → 同步內部狀態
   stdAc::state_t heard;
   if (IRAcUtils::decodeToState(&results, &heard, haveAcState ? &acState : nullptr)) {
+    if (results.decode_type == decode_type_t::HITACHI_AC1) syncHitachiAc1Power(results, heard);
     acState = heard;
     haveAcState = true;
     saveAcState();

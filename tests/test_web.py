@@ -40,7 +40,7 @@ def mock_settings(tmp_path: Path) -> Settings:
         lepton_height=120,
         lepton_colormap="rainbow",
         lepton_reset_gpio=None,
-        ac_protocol="HITACHI_AC344",
+        ac_protocol="HITACHI_AC1",
         ac_name="304D",
         edge_web_enabled=True,
         edge_web_host="0.0.0.0",

@@ -66,3 +66,11 @@ def test_firmware_error_is_raised():
     remote = make_remote("NOPE", {"ac": {"ok": False, "error": "unsupported protocol"}})
     with pytest.raises(AcRemoteError, match="unsupported protocol"):
         remote.set_state(power=True)
+
+
+def test_model_is_sent_when_configured():
+    remote = make_remote("HITACHI_AC1")
+    remote.model = "R-LT0541-HTA-B"
+    remote.set_state(power=True, mode="cool", temp=26, fan="high")
+    assert remote._serial.sent[-1]["model"] == "R-LT0541-HTA-B"
+    assert remote._serial.sent[-1]["protocol"] == "HITACHI_AC1"

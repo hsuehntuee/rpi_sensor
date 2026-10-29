@@ -53,6 +53,7 @@ class Settings:
     lepton_reset_gpio: int | None = None
     ac_serial_port: str = "auto"
     ac_protocol: str = ""
+    ac_model: str = ""
     ac_name: str = ""
     edge_web_enabled: bool = True
     edge_web_host: str = "0.0.0.0"
@@ -115,6 +116,7 @@ def load_settings(env_file: str | None = None) -> Settings:
         lepton_reset_gpio=_optional_int("LEPTON_RESET_GPIO"),
         ac_serial_port=os.getenv("AC_SERIAL_PORT", "auto").strip(),
         ac_protocol=os.getenv("AC_PROTOCOL", "").strip().upper(),
+        ac_model=os.getenv("AC_MODEL", "").strip(),
         ac_name=os.getenv("AC_NAME", "").strip(),
         edge_web_enabled=_bool("EDGE_WEB_ENABLED", True),
         edge_web_host=os.getenv("EDGE_WEB_HOST", "0.0.0.0").strip(),

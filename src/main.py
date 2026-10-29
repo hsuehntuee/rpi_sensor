@@ -325,7 +325,7 @@ def main() -> None:
     if settings.ac_serial_port.lower() not in {"", "off", "none", "false"}:
         try:
             from src.control.ir_ac import IrAcRemote
-            ac_remote = IrAcRemote(settings.ac_serial_port, settings.ac_protocol)
+            ac_remote = IrAcRemote(settings.ac_serial_port, settings.ac_protocol, settings.ac_model)
             LOGGER.info("IR AC remote enabled (port=%s, protocol=%s)",
                         settings.ac_serial_port, settings.ac_protocol or "firmware default")
         except Exception as exc:

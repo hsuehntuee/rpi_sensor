@@ -44,9 +44,10 @@ def find_esp32_port() -> str | None:
 
 
 class IrAcRemote:
-    def __init__(self, port: str = "auto", protocol: str = "", baudrate: int = 115200) -> None:
+    def __init__(self, port: str = "auto", protocol: str = "", model: str = "", baudrate: int = 115200) -> None:
         self.port_setting = port
         self.protocol = protocol.upper()
+        self.model = model  # 同一協定有多種遙控器時才需要，例如 HITACHI_AC1 的 R-LT0541-HTA-B
         self.baudrate = baudrate
         self._serial: Any = None
         self._port: str | None = None
@@ -153,6 +154,8 @@ class IrAcRemote:
                                    "swingv": "auto" if swing else "off"}
         if self.protocol:
             payload["protocol"] = self.protocol
+        if self.model:
+            payload["model"] = self.model
         reply = self._request(payload)
         if not reply.get("ok"):
             raise AcRemoteError(reply.get("error", "ESP32 回報失敗"))

@@ -181,14 +181,21 @@ docker compose run --entrypoint "python tests/verify_ir.py" edge-sensor
 
 ```bash
 AC_SERIAL_PORT=auto            # 自動找 CP210x/CH340；或填 /dev/serial/by-id/...；off = 停用
-AC_PROTOCOL=HITACHI_AC344      # 冷氣協定，見下表
+AC_PROTOCOL=HITACHI_AC1        # 冷氣協定，見下表
+AC_MODEL=R-LT0541-HTA-B        # 遙控器型號，下表有寫才需要填，否則留空
 AC_NAME=304D 日立              # 顯示在 /ac 頁面
 ```
 
-| 冷氣 | `AC_PROTOCOL` | 狀態 |
-|---|---|---|
-| 304D 日立 RAS-36UK | `HITACHI_AC344` | 函式庫支援，待實機確認 |
-| 614 東元 MS80IH-ZRS2T | 現場抓碼後決定（`TECO` 或其他） | 待抓碼 |
+| 冷氣 | `AC_PROTOCOL` | `AC_MODEL` | 狀態 |
+|---|---|---|---|
+| 304D 日立 RAS-36UK（遙控器 R-LT0541-HTA） | `HITACHI_AC1` | `R-LT0541-HTA-B` | 已現場抓碼；冷氣（各溫度/風速）與除濕的訊號已驗證與原廠遙控器逐位元相同，送風與開關機待實機確認 |
+| 614 東元 MS80IH-ZRS2T | 現場抓碼後決定（`TECO` 或其他） | | 待抓碼 |
+
+**304D 日立（`HITACHI_AC1`）的特性**（2026-10-29 現場抓碼結果）：
+- 電源鍵是「切換」：遙控器每按一次就切換開／關，訊號裡沒有「開」或「關」的狀態。系統會記住最後的開關狀態來決定要不要切換；若有人用原廠遙控器開關而接收頭沒聽到，面板顯示的開關狀態會相反，此時按一次面板的電源鍵即可（冷氣會切換）。建議 304D 接上接收頭，原廠遙控器的操作會自動同步。
+- 模式只有冷氣、除濕、送風（單冷機）；除濕固定弱風。
+- 風速只有強／中／弱，遙控器沒有「自動」；面板請選強／中／弱。
+- 遙控器沒有擺風功能，面板的擺風鍵對這台無效。
 
 其他品牌可用的協定名稱：`HITACHI_AC424`、`DAIKIN`、`MITSUBISHI_AC`、`PANASONIC_AC`、`TOSHIBA_AC`、`SAMSUNG_AC`、`LG`、`MIDEA`、`COOLIX`、`GREE`… （ESP32 上送 `{"cmd":"protocols"}` 可列出全部）。
 

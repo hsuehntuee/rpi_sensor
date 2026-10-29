@@ -1,20 +1,6 @@
 from unittest.mock import Mock
 
-from src.main import build_camera_task, build_scd41_task, build_sensor_task, guarded
-
-
-def test_one_sensor_failure_preserves_other_reading(database):
-    climate = Mock()
-    climate.read.side_effect = RuntimeError("timing error")
-    co2 = Mock()
-    co2.read.return_value = {"co2_ppm": 700}
-
-    build_sensor_task(database, "device-1", climate, co2)()
-
-    row = database.unsynced("env_metrics")[0]
-    assert row["temperature"] is None
-    assert row["humidity"] is None
-    assert row["co2_ppm"] == 700
+from src.main import build_camera_task, build_scd41_logging_task, guarded
 
 
 def test_camera_failures_do_not_prevent_other_camera(database):
@@ -40,12 +26,19 @@ def test_scd41_task_skips_when_no_new_sample(database):
         None,
         {"temperature": 25.0, "humidity": 55.0, "co2_ppm": 800},
     ]
-    task = build_scd41_task(database, "device-1", sensor)
+    task = build_scd41_logging_task(database, "device-1", sensor)
 
     task()
     assert database.unsynced("env_metrics") == []
     task()
     assert database.unsynced("env_metrics")[0]["co2_ppm"] == 800
+
+
+def test_scd41_read_error_does_not_escape(database):
+    sensor = Mock()
+    sensor.read.side_effect = RuntimeError("i2c timeout")
+    build_scd41_logging_task(database, "device-1", sensor)()
+    assert database.unsynced("env_metrics") == []
 
 
 def test_single_camera_miss_is_not_logged(database, caplog):

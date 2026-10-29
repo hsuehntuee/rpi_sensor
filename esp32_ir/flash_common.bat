@@ -1,10 +1,11 @@
 @echo off
+rem 共用燒錄流程，由 flash_304D.bat / flash_614.bat 呼叫：flash_common.bat <env> <名稱>
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0firmware"
 
-echo == 燒錄冷氣遙控 ESP32 韌體
-echo    請先用 USB 線把 ESP32 接到這台電腦
+echo == 燒錄 %~2 的冷氣遙控 ESP32 韌體
+echo    請先用 USB 線把 ESP32 接到這台電腦（只接一塊）
 echo.
 
 where python >nul 2>&1
@@ -26,7 +27,7 @@ if errorlevel 1 (
 )
 
 echo == 編譯並燒錄（第一次約 10 分鐘，之後約 30 秒）
-python -m platformio run -t upload
+python -m platformio run -e %1 -t upload
 if errorlevel 1 (
     echo.
     echo [失敗] 常見原因：
@@ -38,5 +39,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo == 完成！可以拔下 ESP32 接到樹莓派了
+echo == 完成！這塊 ESP32 已寫好 %~2 的冷氣協定，拔下來插到 %~2 的樹莓派即可
 pause

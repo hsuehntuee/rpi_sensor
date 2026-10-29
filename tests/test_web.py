@@ -158,3 +158,36 @@ def test_ac_set_and_status(mock_settings, database):
 
     remote.set_state.side_effect = RuntimeError("ESP32 沒有回應")
     assert client.post("/api/v1/ac", json={"power": False}).status_code == 502
+
+
+def test_env_api_latest_and_history(mock_settings, database):
+    client = TestClient(create_edge_app(mock_settings, database))
+    assert client.get("/api/v1/env/latest").status_code == 404
+    database.insert_env("test_edge_node", 24.0, 55.0, 600)
+    database.insert_env("test_edge_node", 25.0, 56.0, 610)
+
+    latest = client.get("/api/v1/env/latest").json()
+    assert latest["temperature"] == 25.0 and latest["timestamp"].endswith("Z")
+
+    history = client.get("/api/v1/env", params={"limit": 10}).json()
+    assert history["count"] == 2 and history["data"][0]["co2_ppm"] == 610
+    future = client.get("/api/v1/env", params={"since": "2999-01-01T00:00:00+08:00"}).json()
+    assert future["count"] == 0
+
+
+def test_latest_image_api_serves_jpeg(mock_settings, database):
+    client = TestClient(create_edge_app(mock_settings, database))
+    assert client.get("/api/v1/images/latest/rgb").status_code == 404
+    image = mock_settings.image_dir / "x_rgb.jpg"
+    image.write_bytes(b"\xff\xd8jpeg")
+    database.insert_camera("test_edge_node", "RGB", str(image))
+    res = client.get("/api/v1/images/latest/rgb")
+    assert res.status_code == 200 and res.content == b"\xff\xd8jpeg"
+    assert res.headers["content-type"] == "image/jpeg"
+    assert client.get("/api/v1/images/latest/xyz").status_code == 404
+
+
+def test_cors_allows_lan_pages(mock_settings, database):
+    client = TestClient(create_edge_app(mock_settings, database))
+    res = client.get("/health", headers={"Origin": "http://192.168.1.50:3000"})
+    assert res.headers["access-control-allow-origin"] == "*"

@@ -1,271 +1,402 @@
-# Raspberry Pi 5 環境感測與雙相機邊緣節點 & 遠端 Server 系統 (Edge Sensor & Server System)
+# 樹莓派環境測站（溫濕度 / CO₂、雙相機、冷氣遙控）
 
-本專案包含兩個主要部分：
-1. **樹莓派 5 邊緣感測節點 (Edge Sensor Node)**：部署於 Raspberry Pi 5，負責 CO2/溫濕度感測 (SCD41)、RGB 相機與 FLIR Lepton 熱影像相機拍攝，以及透過 ESP32 紅外線遙控冷氣（`/ac` 頁面）。
-2. **遠端感測資料伺服器 (Remote Server)**：採用 Docker Compose 部署 FastAPI + PostgreSQL，負責接收邊緣端的環境指標數據與 JPEG 影像。
+每間房一台樹莓派 5，每 5 分鐘記錄一次：
+
+- 溫度、濕度、CO₂（SCD41 感測器）
+- 一張可見光照片（樹莓派相機）＋一張熱影像（FLIR Lepton）
+
+並透過一塊 ESP32 發紅外線遙控冷氣。
+
+所有資料都存在樹莓派上，內網裡的電腦、手機都能用瀏覽器看儀表板，或用 **API** 讀資料、控制冷氣（見〈6. 給工程師：內網 API〉）。要集中收資料的話，可以另外架一台 Server（見 [server/README.md](server/README.md)）。
+
+```
+ ┌──────────── 樹莓派 5 ────────────┐        內網任何裝置
+ │ SCD41 ─ I2C                      │      ┌─────────────────┐
+ │ Lepton ─ SPI/I2C   儀表板＋API ──┼─────▶│ 瀏覽器 / 你的程式 │
+ │ 相機 ─ 排線         (port 8080)   │      └─────────────────┘
+ │ ESP32 ─ USB ──▶ 紅外線 ──▶ 冷氣   │──(選用)──▶ Server
+ └──────────────────────────────────┘
+```
 
 ---
 
-## ⚡ 快速開始 (Fast Start)
+## 1. 需要準備的東西
 
-### 1. 全新環境 Server 端啟動步驟
+| 品項 | 數量 | 備註 |
+|---|---|---|
+| Raspberry Pi 5 | 1 | 4 GB RAM 以上 |
+| 樹莓派 5 原廠電源 | 1 | 5V 5A USB-C。電源不足會造成當機或冷氣遙控失靈 |
+| microSD 卡 | 1 | 64 GB 以上，建議 128 GB |
+| SCD41 溫濕度 / CO₂ 感測器 | 1 | |
+| FLIR Lepton 3.x 熱影像模組（含轉接板） | 1 | |
+| 樹莓派相機 | 1 | 用排線接 |
+| ESP32 開發板（NodeMCU-32S / ESP32-WROOM） | 1 | 用來遙控冷氣 |
+| 紅外線發射模組 | 1 | HW-483 或大功率模組（有電晶體驅動的，距離較遠） |
+| 紅外線接收模組 | 1 | 腳位標 `G`、`R`、`Y`（選配，見 2.4） |
+| USB 傳輸線 | 1 | 要能**傳資料**，不能只充電 |
+| 杜邦線（母對母） | 約 20 條 | |
+| Windows 電腦 | 1 | 燒錄 ESP32 用（樹莓派上也能燒，見 4.2） |
 
-在全新的伺服器 (Server) 主機上，請依序執行以下命令：
+---
 
-```bash
-# 1. 複製 repository 並進入 server 目錄
-cd server
+## 2. 接線
 
-# 2. 複製設定檔範本
-cp .env.example .env
+> 腳位編號指的是樹莓派 40 針排針的**實體編號**（Pin 1 在靠近 SD 卡那一端、標有方框的那一腳）。
 
-# 3. 編輯 .env (設定 POSTGRES_PASSWORD 與 API_KEY)
-# 可使用 openssl rand -hex 32 產生強金鑰
-nano .env
+### 2.1 SCD41（溫濕度 / CO₂）
 
-# 4. 使用 Docker Compose 一鍵背景啟動 (自動執行資料庫 Migration 與 FastAPI 服務)
-docker compose up --build -d
-# 或舊版/獨立版本: docker-compose up -d --build
+| 樹莓派腳位 | SCD41 |
+|---|---|
+| Pin 1（3.3V） | VIN |
+| Pin 6（GND） | GND |
+| Pin 32（GPIO12） | SDA |
+| Pin 33（GPIO13） | SCL |
 
-# 5. 健康檢查驗證
-curl http://127.0.0.1:8000/health
-# 預期輸出: {"status":"ok"}
+### 2.2 FLIR Lepton（熱影像）
+
+| 樹莓派腳位 | Lepton 轉接板 |
+|---|---|
+| Pin 17（3.3V） | VIN |
+| Pin 9（GND） | GND |
+| Pin 23（SCLK） | CLK |
+| Pin 21（MISO） | MISO |
+| Pin 19（MOSI） | MOSI |
+| Pin 24（CE0） | CS |
+| Pin 3（SDA） | SDA |
+| Pin 5（SCL） | SCL |
+| Pin 11（GPIO17） | VSYNC |
+| Pin 13（GPIO27） | RESET_L（選接；接了要在 `.env` 設 `LEPTON_RESET_GPIO=27`） |
+
+### 2.3 樹莓派相機
+
+斷電狀態下，用排線接到樹莓派 5 的 **CAM/DISP 0** 接口（金屬接點朝向接口的接點）。
+
+### 2.4 ESP32（冷氣遙控）
+
+```
+ 樹莓派 USB 孔 ════ USB 傳輸線 ════ ESP32
+                  （同一條線供電＋傳指令）
+
+ 紅外線發射模組                     紅外線接收模組（選配）
+   訊號 (S / IN / DAT) ── GPIO32        G ──── ESP32 GND
+   電源 (VCC / + / 中間) ── 3V3         R ──── ESP32 GPIO12
+   地   (GND / −)       ── GND          Y ──── ESP32 GPIO14
 ```
 
-### 2. 樹莓派 邊緣端 (Edge Sensor Node) 啟動步驟
+- HW-483：`S` 是訊號、中間是電源、`−` 是地。
+- 大功率模組：訊號一樣接 GPIO32；模組標示 **5V** 時電源改接 ESP32 的 **VIN（5V）**，標示 3.3V 或 3.3–5V 接 3V3。
 
-在 Raspberry Pi 5 32-bit (或 64-bit) OS 上，我們提供了一鍵配置與啟動指令：
+- **發射模組一定要接 GPIO32**。ESP32 的 GPIO34–39 只能輸入，接上去不會發光。
+- 檢查方法：用手機**前鏡頭**看發射 LED。平常不亮、按遙控指令時閃一下才是對的；一直亮代表 `S` 和 `中間` 接反了。
+- 發射 LED 要**正對冷氣室內機的接收窗**。HW-483 約 1–2 m 內，大功率模組可以更遠。
+- 接收模組是選配：接了之後，有人用原廠遙控器時，網頁上的冷氣狀態也會跟著更新。
+
+---
+
+## 3. 安裝樹莓派（從零開始）
+
+### 3.1 燒錄系統到 SD 卡
+
+1. 在電腦上安裝並打開 [Raspberry Pi Imager](https://www.raspberrypi.com/software/)。
+2. 裝置選 **Raspberry Pi 5**，系統選 **Raspberry Pi OS (64-bit)**，儲存裝置選你的 SD 卡。
+3. 按「下一步」→「編輯設定」：
+   - 設定**主機名稱**（例如 `rpi-614`）、**使用者名稱與密碼**
+   - 設定 **Wi-Fi**（或之後插網路線）
+   - 「服務」分頁勾選 **開啟 SSH**（使用密碼登入）
+4. 寫入完成後，把 SD 卡插進樹莓派，接上電源開機（第一次開機約 2–3 分鐘）。
+
+### 3.2 連線到樹莓派
+
+在同一個內網的電腦打開終端機（Windows 用 PowerShell）：
 
 ```bash
-# 1. 給予啟動腳本執行權限
-chmod +x start_edge.sh
+ssh 使用者名稱@主機名稱.local
+```
 
-# 2. 執行腳本 (會自動偵測硬體、啟用 SPI/I2C、建立並配置 .env 檔，最後一鍵編譯與啟動 Docker)
+例如 `ssh pi@rpi-614.local`，輸入密碼後就進到樹莓派了。以下指令都在樹莓派上執行。
+
+### 3.3 開啟感測器需要的介面
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+
+在檔案**最後面**加上這三行，按 `Ctrl+O`、`Enter` 存檔，`Ctrl+X` 離開：
+
+```text
+dtparam=i2c_arm=on
+dtparam=spi=on
+dtoverlay=i2c2-pi5,pins_12_13
+```
+
+重新開機，等一分鐘後再用 3.2 的方式連回來：
+
+```bash
+sudo reboot
+```
+
+確認三個介面都有出現（三個都要列出來，沒有「No such file」）：
+
+```bash
+ls -l /dev/i2c-1 /dev/i2c-2 /dev/spidev0.0
+```
+
+### 3.4 下載程式
+
+```bash
+sudo apt update
+sudo apt install -y git
+git clone https://github.com/hsuehntuee/rpi_sensor.git
+cd rpi_sensor
+```
+
+### 3.5 設定這台的名稱
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+只需要改最上面兩行，其他維持預設：
+
+```dotenv
+DEVICE_ID=rpi_agri_614_rpi0     # 這台的名稱，每台不同
+AC_NAME=614 東元                 # 冷氣頁面顯示的名稱
+```
+
+`SERVER_URL` 預設是 `off`（資料只存在樹莓派）。之後有 Server 再改，見〈7. 上傳到 Server〉。
+
+### 3.6 安裝並啟動
+
+```bash
+chmod +x start_edge.sh
 ./start_edge.sh
 ```
 
-*(提示：首次啟動後，請確保您的 `.env` 檔案內正確設定了 `DEVICE_ID`、`SERVER_URL` 和 `API_KEY`。)*
+- 第一次執行會問是否安裝 Docker，輸入 `y`。裝完後**登出再登入**（`exit`，再用 3.2 連回來），然後再執行一次 `./start_edge.sh`。
+- 第一次建置約 15–30 分鐘（視網路速度）。
+- 完成後畫面會顯示儀表板網址並持續顯示紀錄，按 `Ctrl+C` 離開即可，**服務會繼續在背景執行，之後開機也會自動啟動**。
 
-*(客戶還沒有自己的 Server 時，`SERVER_URL=off`：完全不上傳，所有資料留在樹莓派；之後填入客戶的 Server 網址並重啟，積壓的資料會自動逐步補傳。)*
+### 3.7 確認
 
-### 3. 已部署的樹莓派更新程式
-
-不需要 `docker pull`：image 是在樹莓派上依 `Dockerfile` 建的，`start_edge.sh` 每次都會自動重建（`docker compose up --build -d`）。
-
-```bash
-cd <repo 路徑>
-git status        # 先確認沒有本機修改（.env、data/ 不在版控內，不受影響）
-git pull
-nano .env         # 對照 .env.example 補上新增的設定（start_edge.sh 只在 .env 不存在時才建立，不會幫你補）
-./start_edge.sh   # 重建並在背景重啟；最後停在 log 畫面，按 Ctrl+C 離開即可，服務會繼續執行
-```
-
-- `requirements.txt` 有變動時，Docker 會重裝所有 Python 套件，第一次重建可能要很久（和初次安裝差不多），屬正常現象。
-- 只改 `.env` 時不用重建，執行 `docker compose up -d` 即可套用。
-
-
-
----
-
-## 📂 專案架構與相對檔案路徑
-
-本專案檔案標註均採用 **相對路徑**，方便在任何環境下直接參照：
-
-- [`start_edge.sh`](start_edge.sh) — 樹莓派邊緣端一鍵硬體設定與 Docker 啟動腳本。
-- [`src/main.py`](src/main.py) — 樹莓派邊緣端主進程（包含 APScheduler 定時排程與同步任務）。
-- [`src/sensors/camera_ir.py`](src/sensors/camera_ir.py) — FLIR Lepton IR 熱感應相機驅動（正式環境 IR 處理模組）。
-- [`src/sensors/camera_rgb.py`](src/sensors/camera_rgb.py) — 樹莓派官方 RGB 相機驅動（rpicam-still / libcamera-still）。
-- [`src/sensors/scd41.py`](src/sensors/scd41.py) — SCD41 CO2 / 溫濕度感測器驅動。
-- [`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c) — High-Performance Native C SPI Kernel VoSPI Driver。
-- [`server/app/main.py`](server/app/main.py) — 遠端 Server FastAPI 主程式與 API Endpoints。
-- [`server/compose.yaml`](server/compose.yaml) — 遠端 Server Docker Compose 配置檔（FastAPI + PostgreSQL）。
-- [`tests/verify_ir.py`](tests/verify_ir.py) — FLIR Lepton 熱影像相機硬體驗證黃金腳本 (Golden Engine Standard)。
-- [`docs/README.md`](docs/README.md) — 樹莓派硬體 1-to-1 接線與 Device Tree 詳細文檔。
-- [`src/control/ir_ac.py`](src/control/ir_ac.py) — ESP32 紅外線冷氣遙控（USB 序列埠）。
-- [`esp32_ir/firmware`](esp32_ir/firmware) — ESP32 韌體（PlatformIO，IRremoteESP8266）。
-- [`esp32_ir/flash_esp32.bat`](esp32_ir/flash_esp32.bat) — 點兩下燒錄 ESP32（Windows）。
-
----
-
-## 🎯 FLIR Lepton IR 長效穩定性與自我恢復機制說明
-
-正式環境的熱感應相機驅動 [`src/sensors/camera_ir.py`](src/sensors/camera_ir.py) 具備高可靠度無人值守容錯架構：
-
-1. **CCI 控制與真 OEM 軟體 Reboot 自動重置**：
-   - 拍照前讀取 Status Register (`0x0002`)。若檢測到晶片處於 FFC 快門自動校正狀態 (`Busy=1`)，自動優雅等待最多 2.5 秒，避免暴力中斷。
-   - 若檢測到異常或逾時，自動發送真實的 Lepton OEM 軟體重置命令 **`0x4842`** (`LEP_CID_OEM_REBOOT`)，重啟內部 ASIC 並等待重新開機完成 (`BootOK=1`)。
-   - 可選硬體引腳支援：支援配置 `LEPTON_RESET_GPIO`（如接至 Pin 13 / GPIO27），當 I2C 死鎖時自動觸發 50ms 主動低電位硬體冷重置。
-2. **Native C Kernel SPI 單例驅動引擎**：
-   - 使用由 [`src/sensors/lepton_capture.c`](src/sensors/lepton_capture.c) 編譯的 100% 零延遲 C 語言 VoSPI 接收引擎。
-   - 驅動採用開機單例快取（Singleton），徹底避免反覆 gcc 編譯與 dlopen 造成的記憶體與動態連結洩漏。
-   - 移除失敗次數鎖定限制，即使遇到偶發干擾也始終維持 C 核心運作，並具備 250ms CS High 脫困時序。
-   - 加入硬體互斥鎖 (`threading.Lock`)，確保定時排程、網頁 Dashboard 即時拍照與外部信號快照不產生資源競爭。
-3. **高動態熱影像後處理 Pipeline**：
-   - **14-bit Pixels 遮罩與絕對溫度換算**：使用 `raw & 0x3FFF` 處理，並支援 $T_{\text{Celsius}} = \frac{\text{raw}}{100} - 273.15$。
-   - **5% 至 95% Percentile 動態範圍裁切**：自動去除極端噪訊，提升人臉與環境對比度。
-   - **鏡像水平翻轉**：採用 `np.fliplr` 修正相機鏡像。
-   - **3x3 中值去斑過濾器 (De-striping Filter)**：有效消除 Lepton 條紋噪訊 (Zebra stripes)。
-   - **Thermal Ironbow / Rainbow 偽彩色 Lut 映射** 與 BICUBIC 高品質雙三次內插放大輸出 JPEG。
-
----
-
-## 🛠️ 單元測試與硬體驗證
-
-在邊緣端 Docker 容器內執行硬體與模組測試：
+查這台樹莓派的 IP：
 
 ```bash
-# 執行所有 Pytest 單元測試
-docker compose run --entrypoint "python -m pytest" edge-sensor
-
-# 執行 FLIR Lepton IR 獨立硬體驗證黃金腳本
-docker compose run --entrypoint "python tests/verify_ir.py" edge-sensor
+hostname -I
 ```
+
+在內網任何一台電腦或手機的瀏覽器打開 `http://<IP>:8080`（例如 `http://192.168.50.167:8080`）：
+
+- 最上方「系統狀態」應該是綠色「系統正常」（還沒插 ESP32 時會顯示「冷氣遙控器未連線」，屬正常）。
+- 5 分鐘內會出現第一筆溫濕度與照片。
 
 ---
 
-## 🍓 樹莓派邊緣端即時視覺化儀表板 (Edge Local Web Dashboard)
+## 4. 燒錄 ESP32（每塊只要做一次）
 
-現在樹莓派 5 邊緣節點已內建專屬的 **本地即時 Web 儀表板**！在與樹莓派處於同一個區網 (WiFi / 乙太網路) 的任何電腦、手機或平板瀏覽器直接打開：
+兩間房的冷氣不同，ESP32 的韌體各自寫死自己那台冷氣，**燒錄時選對房間**即可：
 
-👉 **`http://<樹莓派IP>:8080/dashboard`** （或樹莓派本機 `http://localhost:8080/dashboard`）
-
-### 儀表板內容
-1. **系統狀態（最上方）**：一切正常顯示綠色「系統正常」。有狀況時每一項都寫出原因與處理方式，並標示：
-   - **可自行處理**：客戶照畫面上的說明處理即可（拔插 USB、重新開機、檢查網路），不寫 log。
-   - **需聯繫**：畫面提示「請截圖此區塊聯繫我們」，並在容器 log 寫一行 `[需聯繫] ...`（同一則只寫一次）。
-
-   | 項目 | 可自行處理 | 需聯繫 |
-   |---|---|---|
-   | 儲存空間 | 剩不到 5 GB | 剩不到 2 GB |
-   | 空間不足自動刪照片（見下方說明） | 刪的都已上傳 | 有未上傳的照片被刪（資料遺失） |
-   | 溫濕度感測器 / RGB 相機 / 熱影像相機 | | 沒偵測到，或超過 3 個取樣週期沒有新資料 |
-   | 冷氣遙控器 ESP32 | 未連線（拔插 USB、重開機） | |
-   | 任何一項檢查本身讀取失敗 | | ✔ |
-
-   Server 連不上不示警也不寫 log：資料會暫存在本機、連上後自動補傳（待上傳筆數顯示在數值卡），真的快滿時由「儲存空間」示警把關。資料來源：`GET /api/v1/system/health`。
-2. **即時數值**：溫度、濕度、CO₂（含通風提醒）、冷氣目前設定（點進 `/ac`）、儲存空間、待上傳筆數。
-3. **雙相機最新畫面**：RGB 與 FLIR Lepton 熱影像，點圖放大。
-4. **分頁**：環境紀錄表、本機相片藝廊（可篩選 RGB/熱影像）、系統資訊（硬體狀態、儲存空間、最近一次自動刪照片）。
-5. **操作**：立即拍照、立即同步、自動更新（每 15 秒）開關。
-
-**Log 原則（省 SD 卡）**：預設 `LOG_LEVEL=WARNING`，平常不寫任何例行紀錄；只寫需要聯繫的狀況（相機拍照失敗、感測器讀取失敗、硬體開機偵測失敗、儲存空間快滿、緊急刪照片）。Server 連不上不寫。相機或感測器連續失敗 3 次才寫一次（偶爾漏一張是常態，會自動重試、下一輪也會再拍），之後持續故障不重複寫，恢復後再壞才會再寫。Docker log 每檔 10 MB、保留 3 檔，舊檔自動 gzip 壓縮。除錯時把 `.env` 改成 `LOG_LEVEL=INFO` 即可看到每次取樣/上傳。
-
-**照片什麼時候會被刪？**
-- 每天 03:00：刪除「已上傳到 Server」且超過 `IMAGE_RETENTION_DAYS`（預設 14 天）的照片，Server 上仍有一份。想在樹莓派多留可調大，例如 `IMAGE_RETENTION_DAYS=365`。
-- 緊急保護：可用空間低於 `MIN_DISK_FREE_MB`（預設 1.5 GB）時，從最舊的照片開始刪到剩 2 GB（先刪已上傳的）。發生時儀表板會示警 30 天，並記錄在 `/data/disk_guard_last.json`。
-
----
-
-## ❄️ 冷氣紅外線遙控 (ESP32 + IR)
-
-每台樹莓派用一條 USB 線接一塊 ESP32，由 ESP32 發紅外線控制同一間房的冷氣。
-打開 **`http://<樹莓派IP>:8080/ac`** 即可控制：開關、模式（冷氣/除濕/送風/暖氣/自動）、16–31°C、風速、擺風。
-每次操作都會送出「完整狀態」（跟原廠遙控器一樣），所以不用記住冷氣目前是什麼狀態。
-
-### 接線（給安裝人員）
-
-```
- 樹莓派 USB-A ════ USB 傳輸線（要能傳資料，不能只充電）════ ESP32 (NodeMCU-32S)
-                    ↑ 同一條線供電 + 傳指令
-
- 紅外線發射模組 (HW-483)            紅外線接收模組 (G / R / Y)  ← 選配
-   S   ──── GPIO32                    G ──── GND
-  中間 ──── 3V3                       R ──── GPIO12（韌體輸出 HIGH 供電）
-   −   ──── GND                       Y ──── GPIO14
-```
-
-- **發射模組一定要接 GPIO32**：ESP32 的 GPIO34–39 只能輸入，接上去不會發光。
-- 用手機前鏡頭看發射 LED：**平常不亮、送指令時閃一下**才是對的；一直亮代表 3V3 接到 S 腳了。
-- 發射 LED 要正對冷氣室內機的接收窗。HW-483 由 GPIO 直接推動，距離約 1–2 m；要更遠就換「有電晶體驅動」的大功率發射模組，訊號腳一樣接 GPIO32，電源接 3V3（模組標示 5V 時改接 VIN）。
-- 接收模組是選配：接了之後，有人用原廠遙控器時，網頁上的狀態會跟著同步。
-
-### 設定（每台樹莓派的 `.env`）
-
-```bash
-AC_SERIAL_PORT=auto            # 自動找 CP210x/CH340；或填 /dev/serial/by-id/...；off = 停用
-AC_PROTOCOL=HITACHI_AC1        # 冷氣協定，見下表
-AC_MODEL=R-LT0541-HTA-B        # 遙控器型號，下表有寫才需要填，否則留空
-AC_NAME=304D 日立              # 顯示在 /ac 頁面
-```
-
-| 冷氣 | `AC_PROTOCOL` | `AC_MODEL` | 狀態 |
+| 房間 | 冷氣 | Windows 燒錄檔 | 韌體設定 |
 |---|---|---|---|
-| 304D 日立 RAS-36UK（遙控器 R-LT0541-HTA） | `HITACHI_AC1` | `R-LT0541-HTA-B` | 已現場抓碼；冷氣（各溫度/風速）與除濕的訊號已驗證與原廠遙控器逐位元相同，送風與開關機待實機確認 |
-| 614 東元 MS80IH-ZRS2T | `ELECTRA_AC` | （留空） | 已現場抓碼；冷氣開機、溫度、風速的訊號已驗證與原廠遙控器逐位元相同 |
+| 304D | 日立 RAS-36UK | `esp32_ir\flash_304D.bat` | `esp32_304D` |
+| 614 | 東元 MS80IH | `esp32_ir\flash_614.bat` | `esp32_614` |
 
-**304D 日立（`HITACHI_AC1`）的特性**（2026-10-29 現場抓碼結果）：
-- 電源鍵是「切換」：遙控器每按一次就切換開／關，訊號裡沒有「開」或「關」的狀態。系統會記住最後的開關狀態來決定要不要切換；若有人用原廠遙控器開關而接收頭沒聽到，面板顯示的開關狀態會相反，此時按一次面板的電源鍵即可（冷氣會切換）。建議 304D 接上接收頭，原廠遙控器的操作會自動同步。
-- 模式只有冷氣、除濕、送風（單冷機）；除濕固定弱風。
-- 風速只有強／中／弱，遙控器沒有「自動」；面板請選強／中／弱。
-- 遙控器沒有擺風功能，面板的擺風鍵對這台無效。
+### 4.1 在 Windows 電腦燒錄（建議）
 
-**614 東元（`ELECTRA_AC`）的特性**（2026-10-29 現場抓碼結果）：
-- 訊號裡直接帶開／關狀態（不是切換式），面板顯示不會跟冷氣相反。
-- 模式有冷氣、除濕、暖氣、送風、自動；風速有自動／弱／中／強；上下、左右擺風。
-- 遙控器每次會帶「按了哪顆鍵」的鍵碼，韌體依這次改變的項目自動填入（電源、模式、風速、左右擺風、溫度±）。
-- 這台遙控器的訊號時序比標準短，接收頭約有 1/6 的按鍵解不出來（不影響發送，只是那次不會同步到面板）。
+1. 電腦需安裝 [Python 3](https://www.python.org/downloads/)（安裝時勾選 **Add python.exe to PATH**）。
+2. 下載這個專案（GitHub 頁面 → Code → Download ZIP，解壓縮）。
+3. 用 USB 傳輸線把 ESP32 接到電腦（一次只接一塊）。
+4. 點兩下對應房間的 `.bat`，等畫面顯示「完成」。第一次會自動安裝工具並編譯，約 10 分鐘；之後每塊約 30 秒。
 
-其他品牌可用的協定名稱：`HITACHI_AC424`、`DAIKIN`、`MITSUBISHI_AC`、`PANASONIC_AC`、`TOSHIBA_AC`、`SAMSUNG_AC`、`LG`、`MIDEA`、`COOLIX`、`GREE`… （ESP32 上送 `{"cmd":"protocols"}` 可列出全部）。
+燒錄失敗時畫面會列出常見原因：USB 線只能充電、沒裝 CH340/CP210x 驅動、需要按住板子上的 BOOT 鍵。
 
-容器已有 `privileged` 與 `/dev` 掛載，看得到 USB 序列埠，不需改 `docker-compose.yml`。
+### 4.2 在樹莓派上燒錄（沒有 Windows 電腦時）
 
-### 燒錄 ESP32（出貨前，在 Windows 電腦上做一次）
+把 ESP32 用 USB 接到樹莓派，然後：
 
-1. 用 USB 線把 ESP32 接到電腦。
-2. **點兩下 `esp32_ir/flash_esp32.bat`**，等它顯示「完成」。（第一次會自動安裝工具並編譯，約 10 分鐘；之後約 30 秒。）
-3. 拔下 ESP32，照上面的接線圖接到樹莓派即可。
+```bash
+cd ~/rpi_sensor
+docker compose stop edge-sensor                  # 先讓出 USB 序列埠
+sudo apt install -y python3-venv                 # 只有第一次需要
+python3 -m venv ~/pio && ~/pio/bin/pip install platformio   # 只有第一次需要
+cd esp32_ir/firmware
+~/pio/bin/pio run -e esp32_614 -t upload         # 304D 那台改成 esp32_304D
+cd ~/rpi_sensor
+docker compose start edge-sensor
+```
 
-失敗時畫面會列出常見原因：USB 線只能充電、沒裝 CH340/CP210x 驅動、需要按住板子上的 BOOT 鍵。
+### 4.3 裝到現場
 
-### 安裝到現場的順序
+燒好的 ESP32 照〈2.4〉接好發射模組，USB 插到該房間的樹莓派即可（隨插隨用，不需要重開機）。幾秒內，儀表板的冷氣卡片就會顯示目前設定。
 
-1. 燒好 ESP32（上一節）。
-2. 樹莓派更新程式並設定 `.env`（見「快速開始 → 3. 已部署的樹莓派更新程式」，設定值見上方「設定」）。
-3. ESP32 的 USB 插到樹莓派，照接線圖接好發射模組，**發射頭正對冷氣室內機的接收窗**。
-4. 執行 `./start_edge.sh`（若容器已在跑，ESP32 晚點才插也可以，程式第一次用到時才會去找 port）。
-5. 驗證：
-   ```bash
-   ls /dev/serial/by-id/          # 應看到含 1a86（CH340）或 10c4（CP210x）的裝置
+---
+
+## 5. 日常使用
+
+| 網址 | 內容 |
+|---|---|
+| `http://<IP>:8080` | 儀表板：系統狀態、溫濕度/CO₂、冷氣、剩餘空間、最新照片、歷史紀錄 |
+| `http://<IP>:8080/ac` | 冷氣遙控：開關、模式、溫度、風速、擺風 |
+| `http://<IP>:8080/docs` | API 互動文件（給工程師） |
+
+**系統狀態**（儀表板最上方）：
+
+- **可自行處理**（黃色）：照畫面上的說明處理即可，例如拔插 ESP32 的 USB 線、重新開機。
+- **需聯繫**（紅色）：相機或感測器故障、儲存空間快滿等，請**截圖這個區塊**聯繫維護人員。
+
+**冷氣遙控注意事項**：紅外線是單向的，網頁顯示的是「最後送出的設定」。有人用原廠遙控器時，接了接收模組才會同步。304D 的日立冷氣電源鍵是「切換式」，如果網頁顯示的開關跟實際相反，再按一次網頁上的電源鍵即可。
+
+**照片保留**：
+
+- 有設定 Server 時，已上傳的照片在樹莓派保留 14 天（`IMAGE_RETENTION_DAYS`）。
+- 剩餘空間低於 1.5 GB 時，會自動從最舊的照片開始刪，並在系統狀態示警。
+- 128 GB 的卡不上傳約可存 250 天。
+
+---
+
+## 6. 給工程師：內網 API
+
+每台樹莓派都是一個測站。內網中任何裝置都可以用 HTTP 讀資料、控制冷氣，用來寫自己的邏輯（例如溫度過高自動開冷氣、把資料存進自己的資料庫）。
+
+- 網址：`http://<樹莓派IP>:8080`
+- 不需要帳密。**只限內網使用，不要把 8080 port 開到網際網路上。**
+- 已開啟 CORS，內網其他網頁可以直接用 JavaScript 呼叫。
+- 互動文件：`http://<樹莓派IP>:8080/docs`，可以直接在網頁上試打每個 API。
+- 時間一律是 UTC、ISO 8601 格式（例如 `2026-10-29T03:35:00Z`，台北時間要 +8 小時）。
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| GET | `/health` | 服務是否正常、裝置名稱 |
+| GET | `/api/v1/env/latest` | 最新一筆溫度 (°C)、濕度 (%)、CO₂ (ppm) |
+| GET | `/api/v1/env?limit=100&since=2026-10-29T00:00:00+08:00` | 歷史紀錄（新到舊，每 5 分鐘一筆）。`since` 可省略 |
+| GET | `/api/v1/images/latest/rgb` | 最新一張可見光照片（JPEG） |
+| GET | `/api/v1/images/latest/ir` | 最新一張熱影像（JPEG） |
+| GET | `/api/v1/images/list?limit=60&type=IR` | 照片清單（含網址，`type` 可省略或填 `RGB`/`IR`） |
+| GET | `/api/v1/system/health` | 系統狀態示警、剩餘空間、冷氣遙控連線狀態 |
+| GET | `/api/v1/ac` | 冷氣目前設定、ESP32 連線狀態、室溫 |
+| POST | `/api/v1/ac` | 控制冷氣（見下方範例） |
+| GET | `/api/v1/overview` | 儀表板用的總覽（各類筆數、最新資料） |
+
+**用 curl 試**：
+
+```bash
+curl http://192.168.50.167:8080/api/v1/env/latest
+curl -o ir.jpg http://192.168.50.167:8080/api/v1/images/latest/ir
+curl -X POST http://192.168.50.167:8080/api/v1/ac \
+     -H "Content-Type: application/json" \
+     -d '{"power": true, "mode": "cool", "temp": 26, "fan": "auto", "swing": false}'
+```
+
+**Python 範例**（需 `pip install requests`）：
+
+```python
+import requests
+
+PI = "http://192.168.50.167:8080"
+
+# 讀最新溫濕度
+env = requests.get(f"{PI}/api/v1/env/latest", timeout=5).json()
+print(env["temperature"], env["humidity"], env["co2_ppm"])
+
+# 讀今天以來的歷史紀錄
+history = requests.get(f"{PI}/api/v1/env",
+                       params={"since": "2026-10-29T00:00:00+08:00", "limit": 1000}, timeout=10).json()
+for row in history["data"]:
+    print(row["timestamp"], row["temperature"])
+
+# 下載最新熱影像
+with open("ir.jpg", "wb") as f:
+    f.write(requests.get(f"{PI}/api/v1/images/latest/ir", timeout=10).content)
+
+# 太熱就開冷氣 26 度
+if env["temperature"] > 28:
+    requests.post(f"{PI}/api/v1/ac",
+                  json={"power": True, "mode": "cool", "temp": 26, "fan": "auto"}, timeout=10)
+```
+
+**冷氣 API 的欄位**（每次都送完整狀態，跟原廠遙控器一樣）：
+
+| 欄位 | 值 |
+|---|---|
+| `power` | `true` / `false` |
+| `mode` | `cool` 冷氣 / `dry` 除濕 / `fan` 送風 / `heat` 暖氣 / `auto` 自動 |
+| `temp` | 16–31 |
+| `fan` | `auto` / `low` / `medium` / `high` |
+| `swing` | `true` / `false` |
+
+各冷氣的支援程度：304D 日立只有冷氣/除濕/送風，風速只有弱/中/強，沒有擺風；614 東元全部支援。
+
+成功時回傳 200 與送出後的狀態。ESP32 沒接或沒回應時回傳 502，`detail` 欄位有原因。
+
+---
+
+## 7. 上傳到 Server（選用）
+
+1. 照 [server/README.md](server/README.md) 架好 Server。
+2. 在每台樹莓派的 `.env` 設定：
+
+   ```dotenv
+   SERVER_URL=http://<Server的IP>:8000
+   API_KEY=<與 Server 的 .env 相同的 API_KEY>
    ```
-   打開 `http://<樹莓派IP>:8080/ac` 按「開機」，冷氣應會嗶一聲；主儀表板的冷氣卡片應顯示目前設定，「系統資訊」分頁顯示「已連線」。
 
-### 疑難排解
+3. 套用設定（不用重新建置）：
+
+   ```bash
+   cd ~/rpi_sensor
+   docker compose up -d
+   ```
+
+之前存在樹莓派的資料會自動逐步補傳。資料量大時需要一段時間，例如 3 萬張照片約一天。
+
+---
+
+## 8. 更新程式
+
+```bash
+cd ~/rpi_sensor
+git pull
+./start_edge.sh
+```
+
+只改了 `.env` 的話，執行 `docker compose up -d` 即可（幾秒鐘）。
+
+---
+
+## 9. 疑難排解
 
 | 狀況 | 處理 |
 |---|---|
-| `ls /dev/serial/by-id/` 看不到裝置 | 換一條能傳資料的 USB 線；執行 `dmesg \| tail -20`，若看到 `brltty` 佔用 CH340，執行 `sudo apt remove brltty` 後重插 USB |
-| 面板顯示「冷氣遙控器 (ESP32) 未連線」 | 拔插 ESP32 的 USB 線；仍不行就重新開機 |
-| 面板顯示已送出，但冷氣沒反應 | 發射頭沒對準或太遠（HW-483 約 1–2 m）；用手機前鏡頭看發射頭，送指令時應閃一下；`AC_PROTOCOL` 是否正確 |
-| 發射頭一直亮 | 3V3 接到了 S 腳，照接線圖重接 |
-| 想看詳細 log 除錯 | `.env` 改 `LOG_LEVEL=INFO` 後 `docker compose up -d`，再 `docker compose logs -f edge-sensor`；除錯完改回 `WARNING` |
+| 瀏覽器打不開儀表板 | 確認電腦和樹莓派在同一個內網；在樹莓派上執行 `docker compose ps`，狀態應為 `Up` |
+| 「冷氣遙控器 (ESP32) 未連線」 | 拔插 ESP32 的 USB 線；換一條能傳資料的線；仍不行就重新開機 |
+| 網頁顯示已送出，但冷氣沒反應 | 發射頭沒對準或太遠；用手機前鏡頭看發射頭，送指令時應閃一下；確認 ESP32 燒的是這間房的韌體 |
+| 發射頭一直亮 | 訊號和電源接反了，照 2.4 重接 |
+| `ls /dev/serial/by-id/` 沒有 ESP32 | `dmesg \| tail -20` 若看到 `brltty`，執行 `sudo apt remove brltty` 後重插 USB |
+| 溫濕度/相機「沒有新資料」 | 檢查排線與杜邦線，重新開機；確認 3.3 的三個介面都存在。完整硬體檢查：`./test.sh`（結果存在 `test_report.log`） |
+| 想看詳細紀錄 | `.env` 改 `LOG_LEVEL=INFO` → `docker compose up -d` → `docker compose logs -f edge-sensor`；看完改回 `WARNING` |
+
+重新開機：`sudo reboot`。服務會自動啟動。
 
 ---
 
-## 🔍 Server 端即時檢視資料庫 (DB) 與照片 (RGB & IR) 指令
+## 10. 專案結構（開發用）
 
-在遠端 Server 主機上，您可以使用以下 3 種方式快速檢視已上傳的數據與照片：
+| 路徑 | 內容 |
+|---|---|
+| `src/main.py` | 主程式：排程取樣、拍照、上傳 |
+| `src/web/app.py` | 儀表板、冷氣頁面與 API |
+| `src/web/health.py` | 系統狀態檢查（示警規則） |
+| `src/control/ir_ac.py` | 透過 USB 序列埠控制 ESP32 |
+| `src/sensors/` | SCD41、相機、Lepton 驅動 |
+| `src/db/` | 本機 SQLite 與上傳 |
+| `esp32_ir/firmware/` | ESP32 韌體（PlatformIO，IRremoteESP8266） |
+| `server/` | 選用的資料收集 Server |
+| `tests/` | 單元測試：`docker compose run --rm --entrypoint "python -m pytest" edge-sensor` |
+| `test.sh`、`tests/hw_camera_check.py`、`tests/verify_ir.py` | 樹莓派上的硬體檢查工具（I2C/SPI、相機、Lepton） |
 
-### 1. 瀏覽器即時視覺化儀表板 (Server Web Dashboard)
-打開瀏覽器訪問：
-👉 **`http://<SERVER_IP>:8000/dashboard`**
-- 彙整由邊緣節點同步至 PostgreSQL 的完整歷史數據與照片。
-- 最新雙相機照片對照與歷史藝廊。
+**冷氣協定備忘**（現場抓碼結果，2026-10-29）：
 
-### 2. 一鍵快速檢視腳本 (終端機輸出)
-```bash
-cd server
-./inspect.sh
-```
+- 304D 日立：`HITACHI_AC1`，遙控器型號 B。電源是「切換」位元，韌體照原廠遙控器的格式組訊號。
+- 614 東元：`ELECTRA_AC`。訊號帶「按了哪顆鍵」的鍵碼，韌體依改變的項目自動填入。
 
-### 3. 單行資料庫查詢指令
-```bash
-# 查看最新 10 筆環境感測數據 (SCD41)
-docker compose -f server/compose.yaml exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, temperature, humidity, co2_ppm FROM env_metrics ORDER BY timestamp DESC LIMIT 10;"
-
-# 查看最新 10 筆相機照片上傳紀錄 (RGB & IR)
-docker compose -f server/compose.yaml exec db psql -U rpi_sensor -d rpi_sensor -c "SELECT id, device_id, timestamp, image_type, file_path, size_bytes FROM camera_logs ORDER BY timestamp DESC LIMIT 10;"
-
-# 查看磁碟實體照片檔案
-ls -lht server/storage/images/* | head -n 10
-```
-
+要支援其他冷氣，需先用紅外線接收頭抓原廠遙控器的訊號分析，再在 `esp32_ir/firmware/platformio.ini` 新增一個設定。

@@ -185,12 +185,13 @@ class LocalDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_latest_hvac(self, limit: int = 15) -> list[dict[str, Any]]:
+    def get_env_history(self, limit: int = 100, since: str | None = None) -> list[dict[str, Any]]:
+        """環境數值，新到舊；since 為 SQLite UTC 時間字串 (YYYY-MM-DD HH:MM:SS)，只回傳之後的資料"""
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT id, device_id, timestamp, hvac_state, power_w, is_synced "
-                "FROM hvac_status ORDER BY id DESC LIMIT ?",
-                (limit,),
+                "SELECT id, timestamp, temperature, humidity, co2_ppm FROM env_metrics "
+                "WHERE (? IS NULL OR timestamp > ?) ORDER BY id DESC LIMIT ?",
+                (since, since, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 

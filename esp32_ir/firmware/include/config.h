@@ -15,9 +15,13 @@
 #define IR_RECV_PWR_PIN 12
 #endif
 
-// 預設冷氣協定；樹莓派每次送指令都會帶 protocol，這裡只是開機時的初值。
+// 這塊板子控制的冷氣（寫死在韌體裡，由 platformio.ini 的 esp32_304D / esp32_614 決定）。
+// 樹莓派的 .env 若有填 AC_PROTOCOL 會以樹莓派為準；沒填就用這裡的值。
 #ifndef DEFAULT_PROTOCOL
-#define DEFAULT_PROTOCOL "HITACHI_AC344"
+#define DEFAULT_PROTOCOL "HITACHI_AC1"
+#endif
+#ifndef DEFAULT_MODEL
+#define DEFAULT_MODEL ""  // 同一協定有多種遙控器時才需要，例如 "R-LT0541-HTA-B"
 #endif
 
 // ---- IR 接收參數 -----------------------------------------------------------

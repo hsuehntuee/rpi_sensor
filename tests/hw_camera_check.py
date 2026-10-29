@@ -1,7 +1,7 @@
 """Standalone pure camera test script for Docker container on Raspberry Pi.
 
 Run inside Docker on Raspberry Pi:
-    docker compose run --build --rm edge-sensor python tests/test_camera_standalone.py
+    docker compose run --rm --entrypoint python edge-sensor tests/hw_camera_check.py
 """
 import os
 import sys

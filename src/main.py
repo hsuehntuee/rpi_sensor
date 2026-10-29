@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from datetime import datetime, timezone
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -50,57 +49,6 @@ def guarded(name: str, task: Callable[[], None]) -> Callable[[], None]:
         except Exception:
             LOGGER.exception("%s task failed", name)
     return run
-
-
-def build_sensor_task(
-    database: LocalDatabase,
-    device_id: str,
-    climate_sensor: Readable,
-    co2_sensor: Readable,
-) -> Callable[[], None]:
-    def collect() -> None:
-        temperature: float | None = None
-        humidity: float | None = None
-        co2_ppm: int | None = None
-        try:
-            climate = climate_sensor.read()
-            temperature = float(climate["temperature"])
-            humidity = float(climate["humidity"])
-        except Exception:
-            LOGGER.exception("climate sensor read failed")
-        try:
-            co2 = co2_sensor.read()
-            co2_ppm = int(co2["co2_ppm"])
-        except Exception:
-            LOGGER.exception("CO2 sensor read failed")
-        if temperature is not None or humidity is not None or co2_ppm is not None:
-            database.insert_env(
-                device_id=device_id,
-                temperature=temperature,
-                humidity=humidity,
-                co2_ppm=co2_ppm,
-            )
-
-    return collect
-
-
-def build_scd41_task(
-    database: LocalDatabase,
-    device_id: str,
-    sensor: Readable,
-) -> Callable[[], None]:
-    def collect() -> None:
-        reading = sensor.read()
-        if reading is None:
-            return
-        database.insert_env(
-            device_id=device_id,
-            temperature=float(reading["temperature"]),
-            humidity=float(reading["humidity"]),
-            co2_ppm=int(reading["co2_ppm"]),
-        )
-
-    return collect
 
 
 _CAMERA_TASK_LOCK = threading.Lock()

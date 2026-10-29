@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -38,10 +39,12 @@ def create_edge_app(
 ) -> FastAPI:
     """建立樹莓派邊緣節點專屬的 FastAPI 儀表板應用程式"""
     app = FastAPI(
-        title="Raspberry Pi Edge Local Dashboard",
-        description="樹莓派 5 邊緣節點本地即時監控與控制儀表板",
+        title="樹莓派測站 API",
+        description="內網測站：讀取溫濕度/CO₂、照片、系統狀態，並控制冷氣。互動文件在 /docs。",
         version="1.0.0",
     )
+    # 內網使用、無帳密：允許內網任何網頁直接呼叫
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     image_dir = Path(settings.image_dir)
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +112,48 @@ def create_edge_app(
             "latest_rgb_images": [_fmt_cam(c) for c in latest_rgb],
             "latest_ir_images": [_fmt_cam(c) for c in latest_ir],
         }
+
+    def _iso_utc(ts: Any) -> str | None:
+        """SQLite 的 UTC 時間字串 → ISO 8601（2026-10-29T03:35:00Z）"""
+        return f"{str(ts).replace(' ', 'T')}Z" if ts else None
+
+    def _env_row(row: dict[str, Any]) -> dict[str, Any]:
+        return {"timestamp": _iso_utc(row["timestamp"]), "temperature": row["temperature"],
+                "humidity": row["humidity"], "co2_ppm": row["co2_ppm"]}
+
+    @app.get("/api/v1/env/latest")
+    def env_latest() -> dict[str, Any]:
+        """最新一筆溫度 (°C)、相對濕度 (%)、CO₂ (ppm)"""
+        rows = database.get_env_history(limit=1)
+        if not rows:
+            raise HTTPException(status_code=404, detail="尚無資料")
+        return {"device_id": settings.device_id, **_env_row(rows[0])}
+
+    @app.get("/api/v1/env")
+    def env_history(
+        limit: int = Query(100, ge=1, le=10000, description="最多幾筆（新到舊）"),
+        since: datetime | None = Query(None, description="只回傳這個時間之後的資料，ISO 8601，例如 2026-10-29T00:00:00+08:00"),
+    ) -> dict[str, Any]:
+        """歷史溫濕度/CO₂，新到舊；每 5 分鐘一筆"""
+        since_utc = None
+        if since is not None:
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            since_utc = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        rows = database.get_env_history(limit=limit, since=since_utc)
+        return {"device_id": settings.device_id, "count": len(rows), "data": [_env_row(r) for r in rows]}
+
+    @app.get("/api/v1/images/latest/{kind}")
+    def image_latest(kind: str) -> FileResponse:
+        """最新一張照片（JPEG）。kind = rgb（可見光）或 ir（熱影像）"""
+        image_type = kind.upper()
+        if image_type not in ("RGB", "IR"):
+            raise HTTPException(status_code=404, detail="kind 必須是 rgb 或 ir")
+        rows = database.get_latest_cameras(limit=1, image_type=image_type)
+        if not rows or not Path(rows[0]["file_path"]).is_file():
+            raise HTTPException(status_code=404, detail="尚無照片")
+        return FileResponse(rows[0]["file_path"], media_type="image/jpeg",
+                            headers={"X-Captured-At": _iso_utc(rows[0]["timestamp"]) or ""})
 
     @app.get("/api/v1/images/list")
     def list_local_images(limit: int = 60, type: str | None = None) -> list[dict[str, Any]]:
@@ -237,6 +282,9 @@ def create_edge_app(
 
     @app.post("/api/v1/ac")
     def ac_set(command: AcCommand) -> dict[str, Any]:
+        """控制冷氣：一次送出完整狀態。
+        power: true/false；mode: cool/dry/fan/heat/auto；temp: 16–31；fan: auto/low/medium/high；swing: true/false。
+        回傳送出後的狀態（同 GET /api/v1/ac）。"""
         if ac_remote is None:
             raise HTTPException(status_code=503, detail="冷氣遙控未啟用 (AC_SERIAL_PORT=off)")
         try:

@@ -6,3 +6,4 @@ data/*
 !data/.gitkeep
 
 esp32_ir/firmware/.pio/
+test_report.log

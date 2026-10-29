@@ -3,6 +3,7 @@
 // 樹莓派用 USB 線同時供電＋傳指令（序列埠 115200，一行一個 JSON）：
 //   {"cmd":"ac","protocol":"HITACHI_AC344","power":true,"mode":"cool","temp":26,"fan":"auto","swingv":"off"}
 //       用協定編碼送出完整冷氣狀態；欄位可省略，省略的沿用上一次的值。
+//       protocol 省略時用韌體寫死的 DEFAULT_PROTOCOL（esp32_304D=日立、esp32_614=東元）。
 //   {"cmd":"status"}                  目前狀態、最後一次收到的 IR
 //   {"cmd":"protocols"}               列出可用 "ac" 指令的協定
 //   診斷用：raw / selftest / scan / edges / probe（見 handleCommand）
@@ -89,11 +90,14 @@ void saveAcState() {
 void loadAcState() {
   IRac::initState(&acState);
   acState.protocol = strToDecodeType(DEFAULT_PROTOCOL);
+  acState.model = IRac::strToModel(DEFAULT_MODEL, -1);
   acState.mode = stdAc::opmode_t::kCool;
   acState.degrees = 26;
   String saved = prefs.getString("ac", "");
   JsonDocument d;
-  if (saved.length() && !deserializeJson(d, saved)) {
+  // 只沿用同一協定的舊狀態；板子改燒成另一台冷氣的韌體時，從預設值重新開始
+  if (saved.length() && !deserializeJson(d, saved) &&
+      strToDecodeType(d["protocol"] | "") == acState.protocol) {
     applyJsonToState(d.as<JsonVariantConst>(), acState);
     haveAcState = true;
   }
@@ -320,6 +324,7 @@ void handleCommand(JsonVariantConst in, JsonDocument &out) {
     irrecv.resume();
 
   } else if (cmd == "status") {
+    out["firmware_protocol"] = DEFAULT_PROTOCOL;
     out["recv_idle_level"] = digitalRead(IR_RECV_PIN);  // 接收頭待機應為 1
     out["uptime_s"] = millis() / 1000;
     stateToJson(acState, out["ac"].to<JsonObject>());

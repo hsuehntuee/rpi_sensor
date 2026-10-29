@@ -38,9 +38,6 @@ def test_query_helpers(database):
     assert len(latest_env) == 2
     assert latest_env[0]["temperature"] == 27.0
 
-    latest_hvac = database.get_latest_hvac(limit=5)
-    assert len(latest_hvac) == 1
-    assert latest_hvac[0]["power_w"] == 850.0
 
     latest_rgb = database.get_latest_cameras(limit=5, image_type="RGB")
     assert len(latest_rgb) == 1

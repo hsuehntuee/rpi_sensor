@@ -55,6 +55,15 @@ from unittest.mock import Mock, patch
 from src.sensors.camera_ir import LeptonVoSPI
 
 
+# 讀取方式：Lepton 2.x 每次 xfer2 讀一個 164-byte 封包；Lepton 3.x 每次 _read_frame_bytes
+# 讀 10 × 24 個封包，前 60 個封包是一個 segment（segment 編號在第 20 個封包的 byte0 高 4 位）。
+PACKET = 164
+
+
+def vospi_packet(number: int, value: int, b0: int = 0x00) -> list[int]:
+    return [b0, number, 0, 0] + [value] * (PACKET - 4)
+
+
 @patch("src.sensors.camera_ir.spidev")
 def test_lepton_vospi_reads_frame_lepton_25(mock_spidev):
     mock_spi = Mock()
@@ -62,20 +71,7 @@ def test_lepton_vospi_reads_frame_lepton_25(mock_spidev):
 
     vospi = LeptonVoSPI(spi_bus=0, spi_device=0, width=80, height=60)
     vospi.spi = mock_spi
-
-    mock_packets = []
-    for i in range(60):
-        packet = [0] * 164
-        packet[0] = 0x00
-        packet[1] = i
-        packet[4:] = [i] * 160
-        mock_packets.extend(packet)
-
-    chunk1 = mock_packets[:3936]
-    chunk2 = mock_packets[3936:7872]
-    chunk3 = mock_packets[7872:9840]
-
-    mock_spi.xfer2.side_effect = cycle([chunk1, chunk2, chunk3])
+    mock_spi.xfer2.side_effect = cycle([vospi_packet(i, i) for i in range(60)])
 
     frame = vospi.read_frame()
     assert frame.shape == (60, 80)
@@ -92,30 +88,21 @@ def test_lepton_vospi_reads_frame_lepton_35(mock_spidev):
     vospi = LeptonVoSPI(spi_bus=0, spi_device=0, width=160, height=120)
     vospi.spi = mock_spi
 
-    mock_chunks = []
+    chunks = []
     for seg in range(1, 5):
-        seg_bytes = []
-        for i in range(60):
-            packet = [0] * 164
-            if i == 20:
-                packet[0] = (seg & 0x07) << 4
-            else:
-                packet[0] = 0x00
-            packet[1] = i
-            packet[4:] = [seg * 10 + i] * 160
-            seg_bytes.extend(packet)
-
-        mock_chunks.append(seg_bytes[:3936])
-        mock_chunks.append(seg_bytes[3936:7872])
-        mock_chunks.append(seg_bytes[7872:9840])
-
-    mock_spi.xfer2.side_effect = cycle(mock_chunks)
+        packets = [vospi_packet(i, seg * 10 + i, (seg << 4) if i == 20 else 0x00) for i in range(60)]
+        packets += [vospi_packet(0, 0, 0x0F)] * (240 - 60)  # 其餘是 discard 封包
+        flat = [byte for packet in packets for byte in packet]
+        step = 24 * PACKET
+        chunks += [flat[k:k + step] for k in range(0, len(flat), step)]
+    mock_spi.xfer2.side_effect = cycle(chunks)
 
     frame = vospi.read_frame()
     assert frame.shape == (120, 160)
 
-    expected_p1 = (11 << 8) | 11
+    expected_p1 = (11 << 8) | 11  # segment 1、封包 1 → 第 0 列右半邊
     assert frame[0, 80] == expected_p1
+    assert frame[119, 80] == (((40 + 59) << 8) | (40 + 59))  # segment 4、封包 59 → 最後一列右半邊
 
 
 def test_render_fixed_range_frame():

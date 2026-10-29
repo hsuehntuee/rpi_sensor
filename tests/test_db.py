@@ -31,8 +31,8 @@ def test_query_helpers(database):
     assert counts["hvac_total"] == 1
     assert counts["camera_rgb_total"] == 1
     assert counts["camera_ir_total"] == 1
-    assert counts["total_records"] == 4
-    assert counts["total_unsynced"] == 4
+    assert counts["total_records"] == 5  # env 2 + hvac 1 + RGB 1 + IR 1
+    assert counts["total_unsynced"] == 5
 
     latest_env = database.get_latest_env(limit=5)
     assert len(latest_env) == 2

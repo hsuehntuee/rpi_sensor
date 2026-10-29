@@ -46,6 +46,8 @@ chmod +x start_edge.sh
 
 *(提示：首次啟動後，請確保您的 `.env` 檔案內正確設定了 `DEVICE_ID`、`SERVER_URL` 和 `API_KEY`。)*
 
+*(客戶還沒有自己的 Server 時，`SERVER_URL=off`：完全不上傳，所有資料留在樹莓派；之後填入客戶的 Server 網址並重啟，積壓的資料會自動逐步補傳。)*
+
 ### 3. 已部署的樹莓派更新程式
 
 不需要 `docker pull`：image 是在樹莓派上依 `Dockerfile` 建的，`start_edge.sh` 每次都會自動重建（`docker compose up --build -d`）。

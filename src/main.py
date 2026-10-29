@@ -225,13 +225,16 @@ def main() -> None:
     logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
     logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
     database = LocalDatabase(settings.database_path)
-    sync = RemoteSync(
-        database,
-        settings.server_url,
-        settings.device_id,
-        settings.api_key,
-        settings.http_timeout_seconds,
-    )
+    # SERVER_URL=off：完全不連線上傳，資料留在本機；之後填入 Server 網址會自動補傳全部積壓資料
+    sync = None
+    if settings.server_url != "off":
+        sync = RemoteSync(
+            database,
+            settings.server_url,
+            settings.device_id,
+            settings.api_key,
+            settings.http_timeout_seconds,
+        )
 
     # --- Hardware Initialization ---
 
@@ -359,6 +362,8 @@ def main() -> None:
 
     def sync_task() -> None:
         nonlocal _sync_fail_count
+        if sync is None:
+            return
         try:
             count = sync.sync_all(metrics_batch=100, image_batch=10)
             if count > 0:
@@ -405,6 +410,8 @@ def main() -> None:
                 guarded("manual_camera", camera_task)()
 
             def _manual_sync_callback() -> int:
+                if sync is None:
+                    raise RuntimeError("尚未設定 Server（SERVER_URL=off），資料保留在本機")
                 LOGGER.info("[Web Action] Triggered manual server sync")
                 return sync.sync_all()
 

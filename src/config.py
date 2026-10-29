@@ -71,6 +71,8 @@ def load_settings(env_file: str | None = None) -> Settings:
     server_url = os.getenv("SERVER_URL", "http://localhost:8000").strip().rstrip("/")
     if not server_url:
         server_url = "http://localhost:8000"
+    elif server_url.lower() == "off":  # 不上傳，資料全部留在本機（客戶的 Server 還沒建好時用）
+        server_url = "off"
     raw_db_path = os.getenv("DATABASE_PATH", "/data/sensor.db").strip()
     if raw_db_path and not raw_db_path.startswith("/"):
         raw_db_path = "/" + raw_db_path

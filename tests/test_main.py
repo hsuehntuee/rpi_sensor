@@ -48,6 +48,17 @@ def test_scd41_task_skips_when_no_new_sample(database):
     assert database.unsynced("env_metrics")[0]["co2_ppm"] == 800
 
 
+def test_single_camera_miss_is_not_logged(database, caplog):
+    rgb = Mock()
+    rgb.capture.side_effect = [RuntimeError("missed"), "/data/rgb.jpg"]
+    infrared = Mock()
+    infrared.capture.return_value = "/data/ir.jpg"
+    task = build_camera_task(database, "device-1", rgb, infrared)
+    task()
+    task()
+    assert not any("camera" in r.getMessage() for r in caplog.records)
+
+
 def test_repeated_camera_failure_is_logged_once(database, caplog):
     rgb = Mock()
     rgb.capture.side_effect = RuntimeError("camera missing")

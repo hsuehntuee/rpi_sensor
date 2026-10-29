@@ -803,7 +803,7 @@ class PiIRCamera(RGBCamera):
                 time.sleep(0.5)
                 return
 
-        LOGGER.warning("[IR Recovery] Recovery sequence completed.")
+        LOGGER.info("[IR Recovery] Recovery sequence completed.")
 
     def _capture(self, path: Path) -> None:
         if np is None or Image is None:
@@ -846,13 +846,13 @@ class PiIRCamera(RGBCamera):
                 if attempts > 0:
                     raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
 
-            # 3. If primary capture failed, perform CS-high de-assertion + recovery and retry Native C
-            if raw_frame is None and c_lib is not None:
-                self._consecutive_failures += 1
-                LOGGER.warning(
-                    "[IR Camera] Primary capture missed frame (%d consecutive failures). Performing recovery & retry...",
-                    self._consecutive_failures,
-                )
+            # 3. 漏幀時：重置感測器後再用 Native C 重試（最多 3 次，等待時間逐次加長）。
+            #    偶爾漏一幀是 Lepton 的常態，只記 INFO，不算故障。
+            #    （原本的 Python VoSPIReader 備援路徑從未實作，已移除。）
+            for retry, timeout_ms in enumerate((2000, 2500, 3000), 1):
+                if raw_frame is not None or c_lib is None:
+                    break
+                LOGGER.info("[IR Camera] Missed frame, recovery & retry %d/3...", retry)
                 self._recover_sensor()
                 attempts = c_lib.capture_lepton_frame(
                     dev_path,
@@ -860,31 +860,18 @@ class PiIRCamera(RGBCamera):
                     frame_buf,
                     self.vospi.width,
                     self.vospi.height,
-                    2000,
+                    timeout_ms,
                 )
                 if attempts > 0:
                     raw_frame = np.ctypeslib.as_array(frame_buf).reshape((self.vospi.height, self.vospi.width)).copy()
-
-            # 4. Fallback Python reader (for mock environments or platforms without gcc)
-            if raw_frame is None:
-                reader = VoSPIReader(self.vospi.spi_bus, self.vospi.spi_device, speed=self.vospi.spi_speed)
-                try:
-                    resync_reader(reader, delay=0.25)
-                    raw_frame = try_capture(reader, max_seconds=15.0, width=self.vospi.width, height=self.vospi.height)
-                    if raw_frame is None:
-                        self._recover_sensor()
-                        resync_reader(reader, delay=0.5)
-                        raw_frame = try_capture(reader, max_seconds=20.0, width=self.vospi.width, height=self.vospi.height)
-                finally:
-                    reader.close()
 
             # Always ensure our shared vospi SPI handle is released after capture
             self.vospi.close()
 
             if raw_frame is None:
                 self._consecutive_failures += 1
-                LOGGER.error(
-                    "[IR Recovery] Capture failed (%d consecutive failures). Lepton VoSPI timed out.",
+                LOGGER.info(
+                    "[IR Recovery] Capture failed after retries (%d consecutive failures).",
                     self._consecutive_failures,
                 )
                 raise RuntimeError("FLIR Lepton VoSPI capture timed out (raw_frame is None)")

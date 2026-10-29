@@ -73,6 +73,9 @@ class IrAcRemote:
             ser.open()
         except Exception as exc:
             raise AcRemoteError(f"無法開啟 {port}: {exc}") from exc
+        # Linux 開 port 時 ESP32 仍會重開機一次（CH340 自動重置電路），等它開機完再送指令
+        time.sleep(2.0)
+        ser.reset_input_buffer()
         self._serial, self._port = ser, port
         return ser
 
@@ -86,7 +89,7 @@ class IrAcRemote:
 
     def _request(self, payload: dict[str, Any], timeout: float = 3.0) -> dict[str, Any]:
         with self._lock:
-            for attempt in (1, 2):  # 序列埠斷過（拔插 USB）就重開一次
+            for attempt in (1, 2):  # 沒回應就再送一次；序列埠斷過（拔插 USB）就重開
                 try:
                     ser = self._open()
                     ser.reset_input_buffer()
@@ -106,7 +109,7 @@ class IrAcRemote:
                 except AcRemoteError:
                     if attempt == 2:
                         raise
-                    self._close()
+                    # 不關 port 重送：關掉重開會讓 ESP32 再重開機一次
                 except Exception as exc:
                     self._close()
                     if attempt == 2:

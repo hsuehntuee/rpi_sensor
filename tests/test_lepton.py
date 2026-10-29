@@ -138,7 +138,7 @@ def test_pi_ir_camera_low_variance_capture(tmp_path):
     # Add tiny 0.1°C (10 ADU) noise
     uniform_raw[10, 10] += 10
 
-    with patch("src.sensors.camera_ir.try_capture", return_value=uniform_raw), \
+    with patch("src.sensors.camera_ir.compile_and_load_native_c", return_value=FakeCLib([uniform_raw])), \
          patch("src.sensors.camera_ir.read_raw_status", return_value=0x0004):
         
         output_file = tmp_path / "test_ir_uniform.jpg"
@@ -148,3 +148,46 @@ def test_pi_ir_camera_low_variance_capture(tmp_path):
         assert output_file.exists()
         assert output_file.stat().st_size > 0
 
+
+class FakeCLib:
+    """模擬 Native C 擷取：依序回傳 frames（None = 這次漏幀）"""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.calls = 0
+
+    def capture_lepton_frame(self, dev_path, speed, buf, width, height, timeout_ms):
+        import numpy as np
+        self.calls += 1
+        frame = self.frames.pop(0) if self.frames else None
+        if frame is None:
+            return 0
+        np.ctypeslib.as_array(buf)[:] = frame.ravel()
+        return 1
+
+
+def test_missed_frames_retry_native_c_then_succeed(tmp_path):
+    import numpy as np
+    from unittest.mock import patch
+    from src.sensors.camera_ir import PiIRCamera
+
+    frame = np.random.default_rng(0).integers(29000, 31000, (60, 80)).astype(np.uint16)
+    lib = FakeCLib([None, None, frame])  # 漏兩次，第三次成功
+    with patch("src.sensors.camera_ir.compile_and_load_native_c", return_value=lib),          patch("src.sensors.camera_ir.read_raw_status", return_value=0x0004),          patch.object(PiIRCamera, "_recover_sensor"):
+        cam = PiIRCamera(image_dir=tmp_path, width=80, height=60)
+        cam._capture(tmp_path / "ir.jpg")
+    assert lib.calls == 3
+    assert cam._consecutive_failures == 0
+
+
+def test_capture_gives_up_after_three_retries(tmp_path):
+    import pytest
+    from unittest.mock import patch
+    from src.sensors.camera_ir import PiIRCamera
+
+    lib = FakeCLib([])  # 每次都漏幀
+    with patch("src.sensors.camera_ir.compile_and_load_native_c", return_value=lib),          patch("src.sensors.camera_ir.read_raw_status", return_value=0x0004),          patch.object(PiIRCamera, "_recover_sensor"):
+        cam = PiIRCamera(image_dir=tmp_path, width=80, height=60)
+        with pytest.raises(RuntimeError):
+            cam._capture(tmp_path / "ir.jpg")
+    assert lib.calls == 4  # 首次 + 重試 3 次

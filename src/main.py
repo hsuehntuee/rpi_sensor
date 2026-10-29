@@ -26,19 +26,20 @@ class Camera(Protocol):
 
 
 class FailureLatch:
-    """同一個硬體持續故障時只在第一次寫 log，恢復後再壞才會再寫（避免每 5 分鐘洗版佔 SD 卡）"""
+    """硬體連續失敗 threshold 次才寫一次 log（偶爾漏一張是常態，不算故障）；
+    之後持續故障不再重複寫，恢復後再壞才會再寫（避免每 5 分鐘洗版佔 SD 卡）"""
 
-    def __init__(self) -> None:
-        self._failing: set[str] = set()
+    def __init__(self, threshold: int = 3) -> None:
+        self.threshold = threshold
+        self._counts: dict[str, int] = {}
 
     def failed(self, key: str, message: str) -> None:
-        if key not in self._failing:
-            self._failing.add(key)
-            LOGGER.exception("%s (further identical failures are not logged until it recovers)", message)
+        self._counts[key] = self._counts.get(key, 0) + 1
+        if self._counts[key] == self.threshold:
+            LOGGER.exception("%s (%d times in a row; not logged again until it recovers)", message, self.threshold)
 
     def ok(self, key: str) -> None:
-        if key in self._failing:
-            self._failing.discard(key)
+        if self._counts.pop(key, 0) >= self.threshold:
             LOGGER.warning("%s recovered", key)
 
 

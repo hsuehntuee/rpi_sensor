@@ -89,7 +89,7 @@
 - **發射模組一定要接 GPIO32**。ESP32 的 GPIO34–39 只能輸入，接上去不會發光。
 - 檢查方法：用手機**前鏡頭**看發射 LED。平常不亮、按遙控指令時閃一下才是對的；一直亮代表 `S` 和 `中間` 接反了。
 - 發射 LED 要**正對冷氣室內機的接收窗**。HW-483 約 1–2 m 內，大功率模組可以更遠。
-- 接收模組是選配：接了之後，有人用原廠遙控器時，網頁上的冷氣狀態也會跟著更新。
+- 接收模組是選配：接了之後，有人用原廠遙控器時，網頁上的冷氣狀態也會跟著更新。不接的話 GPIO12、GPIO14 留空即可。
 
 ---
 
@@ -275,7 +275,10 @@ docker compose start edge-sensor
 | GET | `/api/v1/system/health` | 系統狀態示警、剩餘空間、冷氣遙控連線狀態 |
 | GET | `/api/v1/ac` | 冷氣目前設定、ESP32 連線狀態、室溫 |
 | POST | `/api/v1/ac` | 控制冷氣（見下方範例） |
+| POST | `/api/v1/actions/capture` | 立即拍一組照片（RGB＋熱影像），約 10–30 秒後回應 |
+| POST | `/api/v1/actions/sync` | 立即上傳到 Server（`SERVER_URL=off` 時會回錯誤說明） |
 | GET | `/api/v1/overview` | 儀表板用的總覽（各類筆數、最新資料） |
+| GET | `/static/images/<檔名>` | 照片檔（檔名來自 `/api/v1/images/list` 的 `url`） |
 
 **用 curl 試**：
 
